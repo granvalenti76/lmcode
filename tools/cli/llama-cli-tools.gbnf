@@ -8,7 +8,7 @@ tool_call ::= "{" ws "\"name\"" ws ":" ws tool_name ws "," ws "\"arguments\"" ws
 
 # Tool names (whitelist of available tools)
 # Must match the tools registered in cli-tool.cpp get_default_tools() and get_swift_tools()
-tool_name ::= "\"read_file\"" | "\"write_file\"" | "\"list_dir\"" | "\"touch_file\"" | "\"shell\"" | "\"swift_build\"" | "\"swift_test\"" | "\"swift_run\"" | "\"swift_package\"" | "\"swift_format\"" | "\"insert_line\"" | "\"replace_range\"" | "\"delete_lines\"" | "\"start_file\"" | "\"append_file\"" | "\"finish_file\"" | "\"search_replace\""
+tool_name ::= "\"read_file\"" | "\"write_file\"" | "\"list_dir\"" | "\"touch_file\"" | "\"shell\"" | "\"swift_build\"" | "\"swift_test\"" | "\"swift_run\"" | "\"swift_package\"" | "\"swift_format\"" | "\"insert_line\"" | "\"replace_range\"" | "\"delete_lines\"" | "\"start_file\"" | "\"append_file\"" | "\"finish_file\"" | "\"search_replace\"" | "\"get_line_numbers\"" | "\"search_regex\""
 
 # Arguments: JSON object with tool-specific fields
 arguments ::= object

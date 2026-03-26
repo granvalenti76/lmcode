@@ -629,6 +629,140 @@ cli_tool_result search_replace(const std::string& path, const std::string& searc
     return result;
 }
 
+// Get line numbers: read file and return content with line numbers prefixed
+cli_tool_result get_line_numbers(const std::string& path) {
+    cli_tool_result result;
+
+    try {
+        if (!fs::exists(path)) {
+            result.error = "File not found: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+        if (!fs::is_regular_file(path)) {
+            result.error = "Not a regular file: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        std::ifstream file(path);
+        if (!file) {
+            result.error = "Cannot open file: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        std::ostringstream content;
+        std::string line;
+        int line_num = 1;
+        
+        // Formatta con numeri di riga allineati (es. "   1 | ")
+        while (std::getline(file, line)) {
+            content << std::setw(4) << line_num++ << " | " << line << "\n";
+        }
+
+        result.content = content.str();
+        result.exit_code = 0;
+        result.success = true;
+
+    } catch (const std::exception& e) {
+        result.error = std::string("Error reading file with line numbers: ") + e.what();
+        result.exit_code = 1;
+        result.success = false;
+    }
+
+    return result;
+}
+
+// Search and replace using regex patterns
+cli_tool_result search_regex(const std::string& path, const std::string& pattern, const std::string& replace) {
+    cli_tool_result result;
+
+    try {
+        if (!fs::exists(path)) {
+            result.error = "File not found: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+        if (!fs::is_regular_file(path)) {
+            result.error = "Not a regular file: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        // Leggi tutto il file
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            result.error = "Cannot open file: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+        std::string original((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        file.close();
+
+        // Esegui la regex
+        std::string new_content;
+        try {
+            std::regex re(pattern);
+            new_content = std::regex_replace(original, re, replace);
+        } catch (const std::regex_error& e) {
+            result.error = std::string("Invalid regex pattern: ") + e.what();
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        if (original == new_content) {
+            result.error = "Regex pattern did not match anything in the file. No changes made.";
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        // Scrittura atomica
+        auto parent = fs::path(path).parent_path();
+        auto tmp_path = parent / (fs::path(path).filename().string() + ".tmp_regex_" + std::to_string(getpid()));
+
+        std::ofstream out(tmp_path, std::ios::binary);
+        if (!out) {
+            result.error = "Cannot open temp file for writing: " + tmp_path.string();
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        out << new_content;
+        out.close();
+
+        if (!out) {
+            fs::remove(tmp_path);
+            result.error = "Write failed (disk full?): " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        fs::rename(tmp_path, path);
+
+        result.content = "Regex replacement successful in " + path;
+        result.exit_code = 0;
+        result.success = true;
+
+    } catch (const std::exception& e) {
+        result.error = std::string("Error in search_regex: ") + e.what();
+        result.exit_code = 1;
+        result.success = false;
+    }
+
+    return result;
+}
+
 cli_tool_result list_directory(const std::string& path) {
     cli_tool_result result;
 
@@ -1092,6 +1226,8 @@ cli_tool_result cli_tool_executor_impl::execute(const cli_tool_call& call, bool 
         else if (call.name == "get_file_info")  result = execute_get_file_info(call);
         else if (call.name == "verify_file")    result = execute_verify_file(call);
         else if (call.name == "search_replace") result = execute_search_replace(call);
+        else if (call.name == "get_line_numbers") result = execute_get_line_numbers(call);
+        else if (call.name == "search_regex")   result = execute_search_regex(call);
         else if (call.name == "list_dir")       result = execute_list_dir(call);
         else if (call.name == "shell")          result = execute_shell(call);
         else if (call.name == "insert_line")    result = execute_insert_line(call);
@@ -1541,6 +1677,50 @@ cli_tool_result cli_tool_executor_impl::execute_verify_file(const cli_tool_call&
         return r;
     }
     auto result = cli_tool_exec::verify_file(path, expected_hash);
+    result.tool_call_id = call.id;
+    return result;
+}
+
+cli_tool_result cli_tool_executor_impl::execute_get_line_numbers(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string path = get_arg(args, "path");
+    if (path.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: path"; r.exit_code = -1;
+        return r;
+    }
+
+    // Security check: only read operations, no CWD restriction needed
+    auto result = cli_tool_exec::get_line_numbers(path);
+    result.tool_call_id = call.id;
+    return result;
+}
+
+cli_tool_result cli_tool_executor_impl::execute_search_regex(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string path = get_arg(args, "path");
+    std::string pattern = get_arg(args, "pattern");
+    std::string replace = get_arg(args, "replace");
+
+    if (path.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: path"; r.exit_code = -1;
+        return r;
+    }
+    if (pattern.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: pattern"; r.exit_code = -1;
+        return r;
+    }
+
+    // Security check: prevent modifying files outside CWD
+    if (!cli_tool_exec::is_in_cwd(path)) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Security: Cannot modify files outside current directory"; r.exit_code = -1;
+        return r;
+    }
+
+    auto result = cli_tool_exec::search_regex(path, pattern, replace);
     result.tool_call_id = call.id;
     return result;
 }

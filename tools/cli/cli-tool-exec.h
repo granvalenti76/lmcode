@@ -75,6 +75,8 @@ private:
     cli_tool_result execute_get_file_info(const cli_tool_call& call);
     cli_tool_result execute_verify_file(const cli_tool_call& call);
     cli_tool_result execute_search_replace(const cli_tool_call& call);
+    cli_tool_result execute_get_line_numbers(const cli_tool_call& call);
+    cli_tool_result execute_search_regex(const cli_tool_call& call);
     cli_tool_result execute_list_dir(const cli_tool_call& call);
     cli_tool_result execute_shell(const cli_tool_call& call);
     cli_tool_result execute_insert_line(const cli_tool_call& call);
@@ -118,6 +120,12 @@ namespace cli_tool_exec {
 
     // Search and replace text in a file
     cli_tool_result search_replace(const std::string& path, const std::string& search, const std::string& replace);
+
+    // Get line numbers for a file (formatted with line numbers)
+    cli_tool_result get_line_numbers(const std::string& path);
+
+    // Search and replace using regex patterns
+    cli_tool_result search_regex(const std::string& path, const std::string& pattern, const std::string& replace);
 
     // List directory
     cli_tool_result list_directory(const std::string& path);

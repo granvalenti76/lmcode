@@ -76,6 +76,8 @@ static const char* GET_FILE_INFO_SCHEMA = R"json({"type":"object","properties":{
 static const char* VERIFY_FILE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"expected_hash":{"type":"string","description":"Expected djb2 hash as returned by append_file or finish_file"}},"required":["path","expected_hash"]})json";
 
 static const char* SEARCH_REPLACE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"search":{"type":"string","description":"Text to search for (must be unique)"},"replace":{"type":"string","description":"Text to replace with"}},"required":["path","search","replace"]})json";
+static const char* GET_LINE_NUMBERS_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"}},"required":["path"]})json";
+static const char* SEARCH_REGEX_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"pattern":{"type":"string","description":"Regex pattern to search for"},"replace":{"type":"string","description":"Text to replace matches with"}},"required":["path","pattern","replace"]})json";
 
 static const char* INSERT_LINE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"line_number":{"type":"integer","description":"0-indexed line number where to insert (0 = beginning, n = end)"},"content":{"type":"string","description":"Line content to insert"}},"required":["path","line_number","content"]})json";
 static const char* REPLACE_RANGE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"0-indexed start line (inclusive)"},"end_line":{"type":"integer","description":"0-indexed end line (exclusive)"},"content":{"type":"string","description":"New content to replace the range"}},"required":["path","start_line","end_line","content"]})json";
@@ -103,6 +105,8 @@ std::vector<cli_tool> get_default_tools() {
         {"verify_file", "Verify file integrity by comparing its hash against an expected value returned by finish_file", VERIFY_FILE_SCHEMA, true},
         // --- Surgical edits on existing files ---
         {"search_replace", "Search for text and replace it (more robust than line numbers)", SEARCH_REPLACE_SCHEMA, false},
+        {"get_line_numbers", "Read file with line numbers prefixed (useful for finding exact positions)", GET_LINE_NUMBERS_SCHEMA, true},
+        {"search_regex", "Search and replace using regex patterns (more powerful than exact match)", SEARCH_REGEX_SCHEMA, false},
         {"list_dir", "List contents of a directory", LIST_DIR_SCHEMA, true},
         {"shell", "Execute a shell command (always requires confirmation)", SHELL_SCHEMA, false},
         {"insert_line", "Insert a line at a specific position in a file", INSERT_LINE_SCHEMA, false},
