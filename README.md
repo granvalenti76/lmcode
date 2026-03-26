@@ -1,17 +1,34 @@
 # lmcode (v0.1-alpha)
 
-**lmcode** is an experimental fork of `llama.cpp` designed to transform `llama-cli` into a native **Agentic Coding Environment**. By integrating tool-calling logic and real-time execution statistics directly into the C++ core, it enables autonomous coding workflows without the overhead or privacy concerns of external HTTP/REST endpoints.
+**lmcode** is an experimental fork of `llama.cpp` that transforms `llama-cli` into a native **Agentic Coding Environment**. It integrates tool-calling logic and real-time execution statistics directly into the C++ core, enabling autonomous coding workflows without HTTP/REST overhead.
+
+---
+<img width="1332" height="744" alt="Screenshot 2026-03-26 alle 12 37 35" src="https://github.com/user-attachments/assets/80cf6fd4-029a-4abf-bf01-bba7adbe6365" />
+<img width="1332" height="744" alt="Screenshot 2026-03-26 alle 12 39 06" src="https://github.com/user-attachments/assets/39e29c8a-9037-4593-b64f-338e2cded495" />
+<img width="1332" height="742" alt="Screenshot 2026-03-26 alle 12 39 49" src="https://github.com/user-attachments/assets/ac15bb1a-1709-4092-89b3-1f2e4ab0ed4f" />
+
+## 🚀 Installation & Build (Tested on MacBook)
+
+For Apple Silicon (M1/M2/M3/M4) users, CMake ensures Metal acceleration is correctly enabled.
+
+### 1. Compile the Agentic CLI
+```bash
+cmake --build build --config Release
+cmake --build build --target llama-cli -j$(nproc)
+```
+
+The executable will be located at: `build/bin/llama-cli`
 
 ---
 
 ## 🏗 Project Architecture
 
-The implementation is modular and baked into the `tools/cli/` directory for maximum performance:
+The implementation is modular and integrated within `tools/cli/` for maximum performance:
 
 * `cli.cpp`: Main inference loop with integrated agentic state machine.
 * `cli-tool.cpp/h`: Registry for tool definitions and compact JSON schemas.
 * `cli-tool-exec.cpp/h`: Secure execution engine for file system and shell operations.
-* `cli-tool-parser.cpp/h`: High-speed extraction of tool-call patterns from model output.
+* `cli-tool-parser.cpp/h`: High-speed extraction of tool-call patterns.
 * `cli-stats.cpp/h`: Granular monitoring of context, tokens/s, and tool latency.
 
 ---
@@ -23,21 +40,23 @@ Designed for precision and context efficiency.
 
 | Tool | Description | Auto-Exec |
 | :--- | :--- | :--- |
-| `read_file` | Reads file content (safely truncated if exceeding 4KB). | ✅ |
+| `read_file` | Reads file content (safely truncated at 4KB). | ✅ |
 | `list_dir` | Lists directory contents for project mapping. | ✅ |
-| `search_replace` | **Surgical Edit**: Replaces a specific block of text. More robust than line numbers. | ❌ |
+| `search_replace` | **Surgical Edit**: Replaces a specific block of text. | ❌ |
 | `insert_line` | Inserts a single line at a specific position. | ❌ |
 | `delete_lines` | Removes a range of lines from a file. | ❌ |
 | `shell` | Executes whitelisted bash commands. | **Always asks** |
 
 ### Chunked Write Chain (Large File Support)
-To handle files that are too large for a single inference pass, use this stateful sequence:
+Optimized for handling files exceeding the model's output window:
 1.  **`start_file`**: Initialize or truncate a file for writing.
-2.  **`append_file`**: Send a chunk (recommended 20-50 lines). Returns a hash for tracking.
-3.  **`finish_file`**: Finalizes the write, closes the stream, and reports total integrity.
+2.  **`append_file`**: Send a chunk (20-50 lines). Returns a hash for tracking.
+3.  **`finish_file`**: Finalizes the write and closes the stream.
 4.  **`verify_file`**: Compares current file hash against expected value.
 
 ---
+
+
 
 ## ⌨️ CLI Commands & Interface
 
@@ -48,29 +67,15 @@ To handle files that are too large for a single inference pass, use this statefu
 - `/clear`: Reset chat history and agent state.
 
 ### Real-time Status Line
-A persistent overlay during generation:
 `[██████....] 12.5K/32K tokens | Cache: +8.2K | Tools: 3/20 | 45.2 t/s`
 
 ---
 
 ## 🛡 Security & Constraints
 
-### Safety Whitelist
-The `shell` tool is restricted to non-destructive commands by default:
-- **Nav**: `ls`, `pwd`, `find`.
-- **Read**: `cat`, `grep`, `head`, `tail`, `diff`.
-- **System**: `git status`, `date`, `uname`.
-
-### Hard Limits
-- **Max Tool Calls**: 20 per turn (prevents infinite loops in smaller models).
-- **Output Truncation**: Tool results are capped to preserve context space.
+- **Max Tool Calls**: 20 per turn (prevents infinite loops).
+- **Output Truncation**: Tool results are capped at 4KB to preserve context.
 - **Strict Blacklist**: Commands like `rm -rf`, `sudo`, or piping to `sh` are hard-blocked.
+- **Safety Whitelist**: `ls`, `pwd`, `find`, `cat`, `grep`, `git status`, `diff`.
 
 ---
-
-## 🚀 Installation & Build
-
-Compile only the agentic CLI using the provided Makefile:
-
-```bash
-make llama-cli
