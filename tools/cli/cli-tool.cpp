@@ -89,6 +89,26 @@ static const char* SWIFT_RUN_SCHEMA = R"json({"type":"object","properties":{"exe
 static const char* SWIFT_PACKAGE_SCHEMA = R"json({"type":"object","properties":{"command":{"type":"string","enum":["resolve","update","add","remove","edit","unedit","show-dependencies"]},"arguments":{"type":"array","items":{"type":"string"}}},"required":["command"]})json";
 static const char* SWIFT_FORMAT_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string"},"in_place":{"type":"boolean","default":false}},"required":["path"]})json";
 
+// --- Snippet tools ---
+// search_snippets: simple ls of ./snippets/ directory
+static const char* SEARCH_SNIPPETS_SCHEMA = R"json({"type":"object","properties":{},"required":[]})json";
+
+// load_snippet: copy ./snippets/<snippet_name> → ./<dest_name>
+static const char* LOAD_SNIPPET_SCHEMA = R"json({
+  "type": "object",
+  "properties": {
+    "snippet_name": {
+      "type": "string",
+      "description": "Filename of the snippet inside ./snippets/ (e.g. 'http_client.cpp')"
+    },
+    "dest_name": {
+      "type": "string",
+      "description": "Destination filename in the working directory (e.g. 'src/http_client.cpp'). The model chooses the final name."
+    }
+  },
+  "required": ["snippet_name", "dest_name"]
+})json";
+
 std::vector<cli_tool> get_default_tools() {
     return {
         {"read_file", "Read contents of a file", READ_FILE_SCHEMA, true},
@@ -111,7 +131,11 @@ std::vector<cli_tool> get_default_tools() {
         {"shell", "Execute a shell command (always requires confirmation)", SHELL_SCHEMA, false},
         {"insert_line", "Insert a line at a specific position in a file", INSERT_LINE_SCHEMA, false},
         {"replace_range", "Replace a range of lines with new content", REPLACE_RANGE_SCHEMA, false},
-        {"delete_lines", "Delete a range of lines from a file", DELETE_LINES_SCHEMA, false}
+        {"delete_lines", "Delete a range of lines from a file", DELETE_LINES_SCHEMA, false},
+        // --- Snippet library (./snippets/) ---
+        // Workflow: search_snippets → load_snippet → search_replace / append_file to customise
+        {"search_snippets", "List all snippets in ./snippets/ directory (simple ls)", SEARCH_SNIPPETS_SCHEMA, true},
+        {"load_snippet",    "Copy a snippet from ./snippets/<snippet_name> to ./<dest_name> in the working directory (model chooses dest name)", LOAD_SNIPPET_SCHEMA, false}
     };
 }
 

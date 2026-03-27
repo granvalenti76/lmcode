@@ -857,20 +857,28 @@ cli_tool_result insert_line_at(const std::string& path, int line_number, const s
             return result;
         }
 
-        // Read all lines
-        std::ifstream file(path);
+        // Read file as binary to preserve exact format
+        std::ifstream file(path, std::ios::binary);
         if (!file) {
             result.error = "Cannot open file: " + path;
             result.exit_code = 1;
             return result;
         }
 
+        std::string file_content((std::istreambuf_iterator<char>(file)),
+                                  std::istreambuf_iterator<char>());
+        file.close();
+
+        // Check if file ends with newline
+        bool has_trailing_newline = !file_content.empty() && file_content.back() == '\n';
+
+        // Split into lines (without newlines)
         std::vector<std::string> lines;
+        std::istringstream iss(file_content);
         std::string line;
-        while (std::getline(file, line)) {
+        while (std::getline(iss, line)) {
             lines.push_back(line);
         }
-        file.close();
 
         // Validate line number (0-indexed, allow 0 to lines.size())
         if (line_number < 0 || line_number > static_cast<int>(lines.size())) {
@@ -898,7 +906,8 @@ cli_tool_result insert_line_at(const std::string& path, int line_number, const s
             out << lines[i];
             if (i < lines.size() - 1) out << "\n";
         }
-        if (!lines.empty()) out << "\n";  // Trailing newline only if file has content
+        // Preserve trailing newline only if original had one AND file has content
+        if (has_trailing_newline && !lines.empty()) out << "\n";
         out.close();
 
         if (!out) {
@@ -931,31 +940,39 @@ cli_tool_result replace_range(const std::string& path, int start_line, int end_l
             return result;
         }
 
-        // Read all lines
-        std::ifstream file(path);
+        // Read file as binary to preserve exact format
+        std::ifstream file(path, std::ios::binary);
         if (!file) {
             result.error = "Cannot open file: " + path;
             result.exit_code = 1;
             return result;
         }
 
+        std::string file_content((std::istreambuf_iterator<char>(file)),
+                                  std::istreambuf_iterator<char>());
+        file.close();
+
+        // Check if file ends with newline
+        bool has_trailing_newline = !file_content.empty() && file_content.back() == '\n';
+
+        // Split into lines (without newlines)
         std::vector<std::string> lines;
+        std::istringstream iss(file_content);
         std::string line;
-        while (std::getline(file, line)) {
+        while (std::getline(iss, line)) {
             lines.push_back(line);
         }
-        file.close();
 
         // Validate line numbers
         int total_lines = static_cast<int>(lines.size());
-        if (start_line < 0 || start_line > total_lines) {
-            result.error = "Invalid start line: " + std::to_string(start_line) + 
-                           " (must be 0-" + std::to_string(total_lines) + ")";
+        if (start_line < 0 || start_line >= total_lines) {
+            result.error = "Invalid start line: " + std::to_string(start_line) +
+                           " (must be 0-" + std::to_string(total_lines - 1) + ")";
             result.exit_code = 1;
             return result;
         }
         if (end_line < start_line || end_line > total_lines) {
-            result.error = "Invalid end line: " + std::to_string(end_line) + 
+            result.error = "Invalid end line: " + std::to_string(end_line) +
                            " (must be >= start_line and <= " + std::to_string(total_lines) + ")";
             result.exit_code = 1;
             return result;
@@ -988,7 +1005,8 @@ cli_tool_result replace_range(const std::string& path, int start_line, int end_l
             out << lines[i];
             if (i < lines.size() - 1) out << "\n";
         }
-        if (!lines.empty()) out << "\n";  // Trailing newline only if file has content
+        // Preserve trailing newline only if original had one AND file has content
+        if (has_trailing_newline && !lines.empty()) out << "\n";
         out.close();
 
         if (!out) {
@@ -1023,20 +1041,28 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
             return result;
         }
 
-        // Read all lines
-        std::ifstream file(path);
+        // Read file as binary to preserve exact format
+        std::ifstream file(path, std::ios::binary);
         if (!file) {
             result.error = "Cannot open file: " + path;
             result.exit_code = 1;
             return result;
         }
 
+        std::string content((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+        file.close();
+
+        // Check if file ends with newline
+        bool has_trailing_newline = !content.empty() && content.back() == '\n';
+
+        // Split into lines (without newlines)
         std::vector<std::string> lines;
+        std::istringstream iss(content);
         std::string line;
-        while (std::getline(file, line)) {
+        while (std::getline(iss, line)) {
             lines.push_back(line);
         }
-        file.close();
 
         // Validate line numbers
         int total_lines = static_cast<int>(lines.size());
@@ -1046,7 +1072,7 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
             return result;
         }
         if (end_line < start_line || end_line > total_lines) {
-            result.error = "Invalid end line: " + std::to_string(end_line) + 
+            result.error = "Invalid end line: " + std::to_string(end_line) +
                            " (must be >= start_line and <= " + std::to_string(total_lines) + ")";
             result.exit_code = 1;
             return result;
@@ -1058,7 +1084,7 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
         // Write atomically to temp file, then rename
         auto parent = fs::path(path).parent_path();
         auto tmp_path = parent / (fs::path(path).filename().string() + ".tmp_" + std::to_string(getpid()));
-        
+
         std::ofstream out(tmp_path);
         if (!out) {
             result.error = "Cannot open temp file for writing: " + tmp_path.string();
@@ -1070,7 +1096,8 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
             out << lines[i];
             if (i < lines.size() - 1) out << "\n";
         }
-        if (!lines.empty()) out << "\n";
+        // Preserve trailing newline only if original had one AND file still has content
+        if (has_trailing_newline && !lines.empty()) out << "\n";
         out.close();
 
         if (!out) {
@@ -1160,7 +1187,7 @@ std::string cli_tool_executor_impl::get_safety_violation(const std::string& cmd)
 
 bool cli_tool_executor_impl::requires_confirmation(const cli_tool_call& call) const {
     if (call.name == "read_file" || call.name == "list_dir" ||
-        call.name == "touch_file") {
+        call.name == "touch_file" || call.name == "search_snippets") {
         return false;
     }
 
@@ -1192,11 +1219,12 @@ bool cli_tool_executor_impl::requires_confirmation(const cli_tool_call& call) co
         return true;
     }
 
-    // write_file, swift_run, swift_package, insert_line, replace_range, delete_lines
+    // write_file, swift_run, swift_package, insert_line, replace_range, delete_lines, load_snippet
     // always need confirmation (they modify files)
     if (call.name == "write_file" || call.name == "swift_run" ||
         call.name == "swift_package" || call.name == "insert_line" ||
-        call.name == "replace_range" || call.name == "delete_lines") {
+        call.name == "replace_range" || call.name == "delete_lines" ||
+        call.name == "load_snippet") {
         return true;
     }
 
@@ -1238,6 +1266,8 @@ cli_tool_result cli_tool_executor_impl::execute(const cli_tool_call& call, bool 
         else if (call.name == "swift_run")      result = execute_swift_run(call);
         else if (call.name == "swift_package")  result = execute_swift_package(call);
         else if (call.name == "swift_format")   result = execute_swift_format(call);
+        else if (call.name == "search_snippets") result = execute_search_snippets(call);
+        else if (call.name == "load_snippet")    result = execute_load_snippet(call);
         else {
             result.error = "Unknown tool: " + call.name;
             result.exit_code = -1;
@@ -1721,6 +1751,216 @@ cli_tool_result cli_tool_executor_impl::execute_search_regex(const cli_tool_call
     }
 
     auto result = cli_tool_exec::search_regex(path, pattern, replace);
+    result.tool_call_id = call.id;
+    return result;
+}
+
+// ============================================================================
+// Snippet library helpers
+// ============================================================================
+
+namespace cli_tool_exec {
+
+// Extract the description from a snippet file.
+// Convention: the very first line of the file may contain a description tag:
+//   C/C++/Swift:   // @desc <description>
+//   Python/Shell:  # @desc <description>
+// If no such tag is found we return an empty string.
+static std::string extract_snippet_desc(const fs::path& path) {
+    std::ifstream f(path);
+    if (!f) return "";
+    std::string line;
+    if (!std::getline(f, line)) return "";
+    // Strip leading whitespace
+    auto start = line.find_first_not_of(" \t");
+    if (start == std::string::npos) return "";
+    line = line.substr(start);
+    // Accept "// @desc ..." or "# @desc ..."
+    const std::string marker = "@desc ";
+    auto pos = line.find(marker);
+    if (pos == std::string::npos) return "";
+    return line.substr(pos + marker.size());
+}
+
+cli_tool_result search_snippets(const std::string& snippets_dir, const std::string& /*query*/) {
+    cli_tool_result result;
+    result.exit_code = 0;
+    result.success   = true;
+
+    try {
+        fs::path dir(snippets_dir.empty() ? "snippets" : snippets_dir);
+
+        if (!fs::exists(dir)) {
+            result.content = "Snippet library not found at: " + dir.string() +
+                             "\nCreate the directory and add snippet files to use this feature.";
+            return result;
+        }
+        if (!fs::is_directory(dir)) {
+            result.error  = "Not a directory: " + dir.string();
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+
+        // Simple ls: list all files in the snippets directory
+        std::ostringstream out;
+        out << "Snippets in " << dir.string() << ":\n";
+
+        int count = 0;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (entry.is_regular_file()) {
+                out << "  " << entry.path().filename().string() << "\n";
+                count++;
+            }
+        }
+
+        if (count == 0) {
+            result.content = "No snippets found in: " + dir.string();
+        } else {
+            result.content = out.str() + "\nTotal: " + std::to_string(count) + " snippet(s)";
+        }
+
+    } catch (const std::exception& e) {
+        result.error     = std::string("Error in search_snippets: ") + e.what();
+        result.exit_code = 1;
+        result.success   = false;
+    }
+
+    return result;
+}
+
+cli_tool_result load_snippet(const std::string& snippets_dir,
+                              const std::string& snippet_name,
+                              const std::string& dest_path) {
+    cli_tool_result result;
+
+    try {
+        fs::path dir(snippets_dir.empty() ? "snippets" : snippets_dir);
+        fs::path src = dir / snippet_name;
+
+        // Validate source
+        if (!fs::exists(src)) {
+            result.error = "Snippet not found: " + src.string() +
+                           "\nRun search_snippets to list available snippets.";
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+        if (!fs::is_regular_file(src)) {
+            result.error     = "Not a regular file: " + src.string();
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+
+        // Validate destination is within CWD
+        if (!is_in_cwd(dest_path)) {
+            result.error     = "Security: dest_name must be inside the current working directory";
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+
+        fs::path dst(dest_path);
+        bool existed = fs::exists(dst);
+
+        // Create parent directories if needed
+        auto parent = dst.parent_path();
+        if (!parent.empty() && !fs::exists(parent)) {
+            fs::create_directories(parent);
+        }
+
+        // Read source
+        std::ifstream in(src, std::ios::binary);
+        if (!in) {
+            result.error     = "Cannot read snippet: " + src.string();
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+        std::string content((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+        in.close();
+
+        // Write atomically
+        auto tmp_path = dst.parent_path() / (dst.filename().string() + ".tmp_snip_" + std::to_string(getpid()));
+        std::ofstream out(tmp_path, std::ios::binary);
+        if (!out) {
+            result.error     = "Cannot write to: " + dst.string();
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+        out << content;
+        out.close();
+        if (!out) {
+            fs::remove(tmp_path);
+            result.error     = "Write failed (disk full?): " + dst.string();
+            result.exit_code = 1;
+            result.success   = false;
+            return result;
+        }
+        fs::rename(tmp_path, dst);
+
+        // Report
+        std::string desc = extract_snippet_desc(src);
+        result.content = (existed ? "Overwritten: " : "Created: ") + dst.string() +
+                         "\nSource: " + src.string() +
+                         (desc.empty() ? "" : "\nDescription: " + desc) +
+                         "\nSize: " + std::to_string(content.size()) + " bytes" +
+                         "\n\nSnippet loaded. Use search_replace or append_file to customise it.";
+        result.exit_code = 0;
+        result.success   = true;
+
+    } catch (const std::exception& e) {
+        result.error     = std::string("Error in load_snippet: ") + e.what();
+        result.exit_code = 1;
+        result.success   = false;
+    }
+
+    return result;
+}
+
+}  // namespace cli_tool_exec (snippet helpers)
+
+// ============================================================================
+// Snippet executor methods
+// ============================================================================
+
+cli_tool_result cli_tool_executor_impl::execute_search_snippets(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string query = args.value("query", std::string(""));
+    auto result = cli_tool_exec::search_snippets(config_.snippets_dir, query);
+    result.tool_call_id = call.id;
+    return result;
+}
+
+cli_tool_result cli_tool_executor_impl::execute_load_snippet(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string snippet_name = args.value("snippet_name", std::string(""));
+    std::string dest_name    = args.value("dest_name",    std::string(""));
+
+    if (snippet_name.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: snippet_name"; r.exit_code = -1;
+        return r;
+    }
+    if (dest_name.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: dest_name"; r.exit_code = -1;
+        return r;
+    }
+
+    // Prevent path traversal in snippet_name (must be a bare filename, no slashes)
+    if (snippet_name.find('/') != std::string::npos ||
+        snippet_name.find('\\') != std::string::npos ||
+        snippet_name == ".." || snippet_name == ".") {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "snippet_name must be a plain filename (no path separators)"; r.exit_code = -1;
+        return r;
+    }
+
+    auto result = cli_tool_exec::load_snippet(config_.snippets_dir, snippet_name, dest_name);
     result.tool_call_id = call.id;
     return result;
 }

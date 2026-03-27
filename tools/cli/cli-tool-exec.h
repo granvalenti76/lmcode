@@ -48,6 +48,9 @@ struct cli_tool_security_config {
 
     // Require confirmation for file writes outside current directory
     bool restrict_to_cwd = true;
+
+    // Path to snippet library directory (relative to CWD)
+    std::string snippets_dir = "snippets";
 };
 
 // Concrete tool executor implementation
@@ -87,6 +90,9 @@ private:
     cli_tool_result execute_swift_run(const cli_tool_call& call);
     cli_tool_result execute_swift_package(const cli_tool_call& call);
     cli_tool_result execute_swift_format(const cli_tool_call& call);
+    // Snippet library tools
+    cli_tool_result execute_search_snippets(const cli_tool_call& call);
+    cli_tool_result execute_load_snippet(const cli_tool_call& call);
 };
 
 // Helper functions
@@ -144,6 +150,21 @@ namespace cli_tool_exec {
 
     // Delete a range of lines from a file
     cli_tool_result delete_lines(const std::string& path, int start_line, int end_line);
+
+    // --- Snippet helpers ---
+
+    // Search snippet library: returns matching entries (name + description from first line)
+    // snippets_dir: path to the snippets directory (default: "./snippets")
+    // query: substring matched case-insensitively against filename (stem) and first-line tag
+    // Empty query returns all snippets.
+    cli_tool_result search_snippets(const std::string& snippets_dir, const std::string& query);
+
+    // Load snippet: copy snippets_dir/<snippet_name> → dest_path
+    // dest_path must be inside CWD.
+    // Fails if snippet does not exist; prompts overwrite warning if dest_path already exists.
+    cli_tool_result load_snippet(const std::string& snippets_dir,
+                                 const std::string& snippet_name,
+                                 const std::string& dest_path);
 }
 
 // Factory function

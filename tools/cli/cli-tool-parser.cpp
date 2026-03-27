@@ -553,7 +553,41 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
 
     // --- Editing files with search_replace ---
     oss << "## Editing Existing Files\n\n";
-    oss << "Use `search_replace` to modify existing files. This is more robust than line numbers.\n\n";
+    oss << "### When to Use Each Tool\n\n";
+    oss << "**Use `insert_line`, `replace_range`, `delete_lines` when:**\n";
+    oss << "- You know the exact line numbers (e.g., \"add at line 5\", \"delete lines 10-15\")\n";
+    oss << "- You want to add/remove code without matching text\n";
+    oss << "- The file is large and text matching might find multiple occurrences\n\n";
+    oss << "**Use `search_replace` when:**\n";
+    oss << "- You don't know line numbers\n";
+    oss << "- You're replacing a unique text pattern\n";
+    oss << "- The change is context-based, not position-based\n\n";
+    oss << "**Use `get_line_numbers` to find line numbers before using surgical tools.**\n\n";
+
+    oss << "### Surgical Editing Tools (Line-Based)\n\n";
+    oss << "**`insert_line`** — Insert a line at a specific position:\n";
+    oss << "```json\n";
+    oss << R"({"name": "insert_line", "arguments": {"path": "main.cpp", "line_number": 5, "content": "int new_var = 42;"}})" << "\n";
+    oss << "```\n";
+    oss << "- `line_number`: 0-indexed (0 = beginning, n = end of file)\n\n";
+
+    oss << "**`replace_range`** — Replace a range of lines:\n";
+    oss << "```json\n";
+    oss << R"({"name": "replace_range", "arguments": {"path": "main.cpp", "start_line": 10, "end_line": 15, "content": "new_line_1\\nnew_line_2\"}})" << "\n";
+    oss << "```\n";
+    oss << "- `start_line`: 0-indexed, inclusive\n";
+    oss << "- `end_line`: 0-indexed, exclusive (like Python slicing)\n";
+    oss << "- `content`: new lines separated by `\\n` (escaped)\n\n";
+
+    oss << "**`delete_lines`** — Delete a range of lines:\n";
+    oss << "```json\n";
+    oss << R"({"name": "delete_lines", "arguments": {"path": "main.cpp", "start_line": 20, "end_line": 25}})" << "\n";
+    oss << "```\n";
+    oss << "- `start_line`: 0-indexed, inclusive\n";
+    oss << "- `end_line`: 0-indexed, exclusive\n\n";
+
+    oss << "### Text-Based Editing\n\n";
+    oss << "**`search_replace`** — Search for text and replace it (more robust than line numbers):\n\n";
     oss << "**How it works:** Provide a unique block of text to search for, and the replacement text.\n";
     oss << "The search text must match EXACTLY (including whitespace and newlines).\n\n";
     oss << "Example:\n";
@@ -590,6 +624,30 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "[tool result: Replaced 2 lines with 2 lines in main.swift]\n";
     oss << "Assistant: Fixed the comparison operator.\n\n";
 
+    oss << "User: Add a new function at line 10\n";
+    oss << "Assistant:\n";
+    oss << "```json\n";
+    oss << R"({"name": "insert_line", "arguments": {"path": "main.swift", "line_number": 10, "content": "func newFunction() { print(\"Hello\") }"}})" << "\n";
+    oss << "```\n";
+    oss << "[tool result: Inserted line at position 10 in main.swift]\n";
+    oss << "Assistant: Added the new function at line 10.\n\n";
+
+    oss << "User: Delete the unused function from lines 20-25\n";
+    oss << "Assistant:\n";
+    oss << "```json\n";
+    oss << R"({"name": "delete_lines", "arguments": {"path": "main.swift", "start_line": 20, "end_line": 25}})" << "\n";
+    oss << "```\n";
+    oss << "[tool result: Deleted lines 20-25 from main.swift (remaining: 95 lines)]\n";
+    oss << "Assistant: Deleted the unused function.\n\n";
+
+    oss << "User: Replace lines 30-35 with a new implementation\n";
+    oss << "Assistant:\n";
+    oss << "```json\n";
+    oss << R"({"name": "replace_range", "arguments": {"path": "main.swift", "start_line": 30, "end_line": 35, "content": "// New implementation\\nfunc updated() {\\n    return 42\\n}"}})" << "\n";
+    oss << "```\n";
+    oss << "[tool result: Replaced lines 30-35 with 3 new lines in main.swift]\n";
+    oss << "Assistant: Updated the implementation.\n\n";
+
     oss << "User: Build the project\n";
     oss << R"({"name": "swift_build", "arguments": {"configuration": "debug"}})" << "\n";
     oss << "[tool result: Build complete!]\n";
@@ -610,6 +668,7 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "- Use `write_file` ONLY for tiny files (<5 lines). For code or longer content, use `start_file` + `append_file`.\n";
     oss << "- ⚠️ **CRITICAL:** Each `append_file` chunk must be 20-50 lines (~1-2 KB). Use `\\n` (escaped) to separate lines. Hard limits: 200 lines / 8 KB.\n";
     oss << "- Do NOT put an entire large file into a single `append_file` — it will be REJECTED. Split into chunks.\n";
+    oss << "- **Editing files:** Use `insert_line`/`replace_range`/`delete_lines` when you know line numbers. Use `search_replace` when you don't.\n";
     oss << "- The `shell` tool does NOT support: >, >>, <<, |, `, $(), ${}. Use only simple commands.\n";
 
     return oss.str();
