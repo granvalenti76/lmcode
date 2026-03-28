@@ -67,7 +67,7 @@ static void draw_separator(int row, int width) {
     move_cursor(row, 1);
     printf("%s", COLOR_GRAY);
     for (int i = 0; i < width; i++) {
-        putchar('─');
+        printf("─");
     }
     printf("%s", COLOR_RESET);
 }
