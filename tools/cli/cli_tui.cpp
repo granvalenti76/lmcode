@@ -72,61 +72,67 @@ static void draw_separator(int row, int width) {
     printf("%s", COLOR_RESET);
 }
 
-static void draw_input_box(int term_height, int term_width) {
+static void render_output(int term_height, int /*term_width*/) {
+    // Layout:
+    // Rows 1 to (term_height-4): output
+    // Row (term_height-3): separator
+    // Row (term_height-2): input
+    // Row (term_height-1): separator
+    // Row term_height: stats
+    
+    int output_rows = term_height - 4;
+    if (output_rows < 1) output_rows = 1;
+
+    // Get ALL lines from buffer
+    auto all_lines = g_output_buffer.get_visible_lines(0);
+
+    // Clear screen
+    printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
+
+    int total = all_lines.size();
+
+    // Always show the LAST lines (most recent)
+    int line_offset = (total > output_rows) ? (total - output_rows) : 0;
+
+    // Print lines starting from row 1
+    for (int i = 0; i < output_rows && (line_offset + i) < total; i++) {
+        move_cursor(1 + i, 1);
+        clear_to_end();
+        printf("%s", all_lines[line_offset + i].c_str());
+    }
+
+    fflush(stdout);
+}
+
+void render() {
+    if (!g_enabled || !g_initialized) return;
+
+    int term_height = get_term_height();
+    int term_width = get_term_width();
+
+    // Render output first (rows 1 to term_height-4)
+    render_output(term_height, term_width);
+
+    // Separator above input (row term_height-3)
+    draw_separator(term_height - 3, term_width);
+
+    // Input box (row term_height-2)
     g_input_row = term_height - 2;
-    draw_separator(g_input_row - 1, term_width);
     move_cursor(g_input_row, 1);
     clear_to_end();
     printf("> %s", g_input_buffer.c_str());
     move_cursor(g_input_row, 3 + g_cursor_pos);
-    fflush(stdout);
-}
 
-static void draw_stats_line(int /*term_height*/, int /*term_width*/) {
-    move_cursor(get_term_height(), 1);
+    // Separator above stats (row term_height-1)
+    draw_separator(term_height - 1, term_width);
+
+    // Stats (row term_height)
+    move_cursor(term_height, 1);
     clear_to_end();
     if (!g_stats_line.empty()) {
         printf("%s", g_stats_line.c_str());
     }
-    fflush(stdout);
-}
 
-static void render_output(int term_height, int /*term_width*/) {
-    // Output area: rows 1 to (term_height-3)
-    int output_rows = term_height - 3;
-    if (output_rows < 1) output_rows = 1;
-    
-    // Get ALL lines from buffer
-    auto all_lines = g_output_buffer.get_visible_lines(0);
-    
-    // Clear screen
-    printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
-    
-    // If we have fewer lines than output_rows, start from row 1
-    // If we have more, show the LAST output_rows lines
-    int total = all_lines.size();
-    int start_row = 1;
-    int line_offset = 0;
-    
-    if (total > output_rows) {
-        // Show last output_rows lines
-        line_offset = total - output_rows;
-    }
-    
-    // Print lines
-    for (int i = 0; i < output_rows && (line_offset + i) < total; i++) {
-        move_cursor(start_row + i, 1);
-        clear_to_end();
-        printf("%s", all_lines[line_offset + i].c_str());
-    }
-    
-    // Clear remaining rows
-    int lines_printed = (total < output_rows) ? total : output_rows;
-    for (int i = lines_printed; i < output_rows; i++) {
-        move_cursor(start_row + i, 1);
-        clear_to_end();
-    }
-    
     fflush(stdout);
 }
 
@@ -322,10 +328,26 @@ void render() {
     int term_height = get_term_height();
     int term_width = get_term_width();
     
+    // Render in order: output first, then UI elements on top
     render_output(term_height, term_width);
-    draw_input_box(term_height, term_width);
-    draw_separator(term_height - 1, term_width);
-    draw_stats_line(term_height, term_width);
+    
+    // Draw separator above input (row term_height-2)
+    draw_separator(term_height - 2, term_width);
+    
+    // Draw input box (row term_height-1)
+    g_input_row = term_height - 1;
+    move_cursor(g_input_row, 1);
+    clear_to_end();
+    printf("> %s", g_input_buffer.c_str());
+    move_cursor(g_input_row, 3 + g_cursor_pos);
+    
+    // Draw separator above stats (row term_height)
+    draw_separator(term_height, term_width);
+    
+    // Stats would go on row term_height+1 but we don't have that row
+    // So stats share the bottom area
+    
+    fflush(stdout);
 }
 
 bool is_enabled() { return g_enabled; }
