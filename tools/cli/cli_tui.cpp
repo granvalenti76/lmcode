@@ -22,10 +22,12 @@ static const char* BLINK_BLOCK_CURSOR = "\033[1 q";  // Blinking block
 static const char* CLEAR_SCREEN = "\033[2J";
 static const char* MOVE_HOME = "\033[H";
 static const char* COLOR_GRAY = "\033[90m";
-static const char* COLOR_GREEN = "\033[32m";
-static const char* COLOR_BOLD = "\033[1m";
 static const char* COLOR_RESET = "\033[0m";
 static const char* COLOR_REVERSE = "\033[7m";
+
+// Layout constants
+static const int OUTPUT_PADDING_LEFT = 25;   // 25 chars left padding for readability
+static const int OUTPUT_PADDING_RIGHT = 25;  // 25 chars right padding for readability
 
 // Terminal state
 static bool g_enabled = true;
@@ -93,11 +95,10 @@ static void draw_input_box(int term_height, int term_width) {
     // Draw separator above input
     draw_separator(g_input_row - 1, term_width);
 
-    // Draw input prompt and content
+    // Draw input prompt and content (no color - keep it simple)
     move_cursor(g_input_row, 1);
     clear_to_end();
-    printf("%s%s> %s", COLOR_BOLD, COLOR_GREEN, COLOR_RESET);
-    printf("%s", g_input_buffer.c_str());
+    printf("> %s", g_input_buffer.c_str());
 
     // Position cursor
     move_cursor(g_input_row, 3 + g_cursor_pos);
@@ -107,7 +108,7 @@ static void draw_input_box(int term_height, int term_width) {
 // Render the output buffer with scroll support
 static void render_output(int term_height, int term_width) {
     // Layout:
-    // Rows 1 to (term_height-4): Output area
+    // Rows 1 to (term_height-4): Output area (with padding)
     // Row (term_height-3): Separator
     // Row (term_height-2): Input box
     // Row (term_height-1): Separator  
@@ -115,6 +116,9 @@ static void render_output(int term_height, int term_width) {
     
     int output_rows = term_height - 4;
     if (output_rows < 1) output_rows = 1;
+    
+    int content_width = term_width - OUTPUT_PADDING_LEFT - OUTPUT_PADDING_RIGHT;
+    if (content_width < 1) content_width = 1;
     
     // Get all lines from buffer
     auto all_lines = g_output_buffer.get_visible_lines(g_output_buffer.size());
@@ -139,12 +143,26 @@ static void render_output(int term_height, int term_width) {
     // Clear screen and move home
     printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
     
-    // Print visible lines
+    // Print visible lines with padding
     int row = 1;
     for (int i = start_idx; i < end_idx && row <= output_rows; i++) {
         move_cursor(row, 1);
         clear_to_end();
-        printf("%s", all_lines[i].c_str());
+        
+        // Print left padding
+        for (int j = 0; j < OUTPUT_PADDING_LEFT; j++) {
+            putchar(' ');
+        }
+        
+        // Print line content (truncated if too wide)
+        const std::string& line = all_lines[i];
+        int print_len = 0;
+        for (char c : line) {
+            if (print_len >= content_width) break;
+            putchar(c);
+            print_len++;
+        }
+        
         row++;
     }
     
@@ -155,7 +173,7 @@ static void render_output(int term_height, int term_width) {
         printf("%s▲ more ▲%s", COLOR_REVERSE, COLOR_RESET);
     }
     if (end_idx < total_lines) {
-        // Show "▼ more below" indicator
+        // Show "▼ more below" indicator  
         move_cursor(output_rows, term_width - 15);
         printf("%s▼ more ▼%s", COLOR_REVERSE, COLOR_RESET);
     }
