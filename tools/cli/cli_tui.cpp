@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <iostream>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <termios.h>
@@ -13,16 +14,9 @@
 namespace cli_tui {
 
 // ANSI escape codes
-static const char* CURSOR_UP = "\033[A";
-static const char* CURSOR_DOWN = "\033[B";
-static const char* CURSOR_RIGHT = "\033[C";
-static const char* CURSOR_LEFT = "\033[D";
-static const char* CURSOR_TO_COL = "\033[G";
-static const char* CLEAR_LINE = "\033[2K";
-static const char* SAVE_CURSOR = "\033[s";
-static const char* RESTORE_CURSOR = "\033[u";
 static const char* HIDE_CURSOR = "\033[?25l";
 static const char* SHOW_CURSOR = "\033[?25h";
+static const char* BLINK_CURSOR_ON = "\033[?12h";
 
 // Terminal state
 static bool g_enabled = false;
@@ -78,7 +72,11 @@ static void draw_input_box() {
     
     // Draw separator line above input
     printf("\033[%d;1H", input_row);  // Move to separator row
-    printf("\033[90m%s\033[0m", std::string(term_width, '─').c_str());
+    printf("\033[90m");
+    for (int i = 0; i < term_width; i++) {
+        printf("─");
+    }
+    printf("\033[0m");
     
     // Move to input row and draw prompt + content
     move_to_row(input_row + 1);
@@ -95,7 +93,7 @@ static void draw_input_box() {
     
     // Position cursor after the text
     int cursor_col = 2 + g_cursor_pos;  // 2 for "> "
-    printf("\033[1;%dH", input_row + 2, cursor_col + 1);  // 1-indexed
+    printf("\033[%d;%dH", input_row + 2, cursor_col + 1);  // 1-indexed row;col
     fflush(stdout);
 }
 
@@ -138,8 +136,8 @@ void init() {
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
     
-    // Hide cursor
-    printf("%s", HIDE_CURSOR);
+    // Hide cursor and enable blinking block cursor
+    printf("%s%s", HIDE_CURSOR, BLINK_CURSOR_ON);
     fflush(stdout);
     
     // Setup signal handler for resize
@@ -287,6 +285,32 @@ void clear_input_area() {
     clear_to_end();
     
     fflush(stdout);
+}
+
+void scroll_output() {
+    if (!g_enabled || !g_initialized) return;
+    
+    // Move cursor to just above the input box and print newline
+    // This pushes the content up and keeps the input box at bottom
+    move_to_row(g_input_line_row - 1);
+    printf("\n");
+    
+    // Redraw input box at bottom
+    draw_input_box();
+}
+
+void hide_for_generation() {
+    if (!g_enabled || !g_initialized) return;
+    
+    // Clear the input box lines
+    clear_input_area();
+}
+
+void show_after_generation() {
+    if (!g_enabled || !g_initialized) return;
+    
+    // Redraw the input box
+    draw_input_box();
 }
 
 bool is_enabled() {

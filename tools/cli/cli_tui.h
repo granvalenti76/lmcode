@@ -20,6 +20,16 @@ std::string read_input();
 // Clear the input area (used after input is submitted)
 void clear_input_area();
 
+// Scroll output and redraw input box at bottom
+// Call this before printing output that should appear above the input
+void scroll_output();
+
+// Hide input box during generation
+void hide_for_generation();
+
+// Show input box after generation completes
+void show_after_generation();
+
 // Check if TUI is enabled
 bool is_enabled();
 

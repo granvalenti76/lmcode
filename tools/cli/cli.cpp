@@ -222,6 +222,9 @@ struct cli_context {
                 console::set_display(DISPLAY_TYPE_RESET);
             }
 
+            // Hide TUI input box during generation
+            cli_tui::hide_for_generation();
+
             console::spinner::start();
             server_task_result_ptr result = rd.next(should_stop);
 
@@ -501,6 +504,9 @@ struct cli_context {
                 model_has_more_to_say = false;
             }
         }
+
+        // Show TUI input box after generation completes
+        cli_tui::show_after_generation();
 
         // Display final stats after generation
         display_status();
