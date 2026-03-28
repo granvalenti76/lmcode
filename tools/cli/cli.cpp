@@ -1003,10 +1003,6 @@ int main(int argc, char ** argv) {
         std::string buffer;
         console::set_display(DISPLAY_TYPE_USER_INPUT);
         if (params.prompt.empty()) {
-            // Clear output buffer before reading new input (start fresh conversation turn)
-            if (cli_tui::is_enabled()) {
-                g_output_buffer.clear();
-            }
             // Use TUI input box if enabled, otherwise fallback to console::readline
             if (cli_tui::is_enabled()) {
                 buffer = cli_tui::read_input();

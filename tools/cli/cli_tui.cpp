@@ -112,6 +112,7 @@ static void render_output(int term_height, int /*term_width*/) {
     
     int output_rows = term_height - 4;
     if (output_rows < 1) output_rows = 1;
+    if (output_rows > 50) output_rows = 50;  // Cap at 50 rows to avoid excessive clearing
     
     // Get visible lines from buffer (last N lines)
     auto lines = g_output_buffer.get_visible_lines(output_rows);
@@ -120,16 +121,13 @@ static void render_output(int term_height, int /*term_width*/) {
     printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
     
     // Print each line at its position (top-aligned)
-    for (size_t i = 0; i < lines.size() && i < static_cast<size_t>(output_rows); i++) {
-        move_cursor(1 + i, 1);
+    int row = 1;
+    for (const auto& line : lines) {
+        if (row > output_rows) break;
+        move_cursor(row, 1);
         clear_to_end();
-        printf("%s", lines[i].c_str());
-    }
-    
-    // Clear any remaining output rows (prevent ghost text)
-    for (size_t i = lines.size(); i < static_cast<size_t>(output_rows); i++) {
-        move_cursor(1 + i, 1);
-        clear_to_end();
+        printf("%s", line.c_str());
+        row++;
     }
     
     fflush(stdout);
@@ -182,12 +180,12 @@ void init() {
     
     // Setup signal handler for resize
     signal(SIGWINCH, handle_resize);
-    
+
     g_initialized = true;
     g_needs_redraw = true;
-    
-    // Initial render
-    render();
+
+    // Don't do initial render - wait for content to be added
+    // render();
 }
 
 void cleanup() {
