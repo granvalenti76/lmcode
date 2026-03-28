@@ -20,6 +20,7 @@ public:
     void push_linef(const char* fmt, ...);
     
     // Get the last N lines for rendering (thread-safe)
+    // If max_lines <= 0, returns ALL lines
     std::vector<std::string> get_visible_lines(int max_lines) const;
     
     // Get total line count

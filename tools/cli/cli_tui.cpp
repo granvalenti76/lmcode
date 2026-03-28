@@ -26,8 +26,8 @@ static const char* COLOR_RESET = "\033[0m";
 static const char* COLOR_REVERSE = "\033[7m";
 
 // Layout constants
-static const int OUTPUT_PADDING_LEFT = 25;   // 25 chars left padding for readability
-static const int OUTPUT_PADDING_RIGHT = 25;  // 25 chars right padding for readability
+static const int OUTPUT_PADDING_LEFT = 4;   // 4 chars left padding for readability
+static const int OUTPUT_PADDING_RIGHT = 4;  // 4 chars right padding for readability
 
 // Terminal state
 static bool g_enabled = true;
@@ -120,8 +120,8 @@ static void render_output(int term_height, int term_width) {
     int content_width = term_width - OUTPUT_PADDING_LEFT - OUTPUT_PADDING_RIGHT;
     if (content_width < 1) content_width = 1;
     
-    // Get all lines from buffer
-    auto all_lines = g_output_buffer.get_visible_lines(g_output_buffer.size());
+    // Get ALL lines from buffer (no limit)
+    auto all_lines = g_output_buffer.get_visible_lines(0);  // 0 = all lines
     
     // Calculate visible window based on scroll offset
     int total_lines = all_lines.size();

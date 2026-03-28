@@ -49,8 +49,8 @@ std::vector<std::string> output_buffer::get_visible_lines(int max_lines) const {
     
     std::vector<std::string> result;
     
-    if (static_cast<int>(lines_.size()) <= max_lines) {
-        // All lines fit
+    if (max_lines <= 0 || static_cast<int>(lines_.size()) <= max_lines) {
+        // Return all lines
         result.assign(lines_.begin(), lines_.end());
     } else {
         // Take only the last max_lines
