@@ -175,6 +175,13 @@ struct cli_context {
     }
 
     std::string generate_completion(result_timings & out_timings) {
+        // Clear output buffer at start of each new response
+        // This prevents old output from showing and keeps the view focused
+        if (cli_tui::is_enabled()) {
+            g_output_buffer.clear();
+            cli_tui::force_redraw();
+        }
+        
         std::string total_content;
         bool model_has_more_to_say = true;
 

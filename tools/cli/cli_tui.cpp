@@ -116,26 +116,19 @@ static void render_output(int term_height, int /*term_width*/) {
     // Get visible lines from buffer (last N lines)
     auto lines = g_output_buffer.get_visible_lines(output_rows);
     
-    // Calculate starting row to center content if less than full screen
-    int start_row = 1;
-    if (lines.size() < static_cast<size_t>(output_rows)) {
-        // Content fits, start from top
-        start_row = 1;
-    }
-    
     // Clear screen and move home
     printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
     
-    // Print each line at its position
+    // Print each line at its position (top-aligned)
     for (size_t i = 0; i < lines.size() && i < static_cast<size_t>(output_rows); i++) {
-        move_cursor(start_row + i, 1);
+        move_cursor(1 + i, 1);
         clear_to_end();
         printf("%s", lines[i].c_str());
     }
     
-    // Clear any remaining output rows
+    // Clear any remaining output rows (prevent ghost text)
     for (size_t i = lines.size(); i < static_cast<size_t>(output_rows); i++) {
-        move_cursor(start_row + i, 1);
+        move_cursor(1 + i, 1);
         clear_to_end();
     }
     
@@ -289,13 +282,29 @@ std::string read_input() {
         
         // Handle escape sequences
         if (c == 27) {  // ESC
-            char seq[3];
+            char seq[4];
             ssize_t n1 = read(STDIN_FILENO, &seq[0], 1);
             if (n1 == 1 && seq[0] == '[') {
                 ssize_t n2 = read(STDIN_FILENO, &seq[1], 1);
                 if (n2 == 1) {
-                    seq[2] = '\0';
+                    // Check for mouse events (ignore them)
+                    if (seq[1] == 'M' || seq[1] == '<') {
+                        // Mouse event - read remaining bytes and ignore
+                        if (seq[1] == 'M') {
+                            read(STDIN_FILENO, &seq[2], 3);  // 3 bytes for old mouse format
+                        } else {
+                            // New format: read until 'm' or 'M'
+                            for (int i = 2; i < 4; i++) {
+                                read(STDIN_FILENO, &seq[i], 1);
+                                if (seq[i] == 'm' || seq[i] == 'M') break;
+                            }
+                        }
+                        render();  // Redraw to restore colors
+                        continue;
+                    }
                     
+                    seq[2] = '\0';
+
                     switch (seq[1]) {
                         case 'C':  // Right arrow
                             if (g_cursor_pos < g_input_buffer.size()) {
