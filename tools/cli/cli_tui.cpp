@@ -16,47 +16,52 @@
 namespace cli_tui {
 
 // ANSI escape codes
-static const char* HIDE_CURSOR = "\033[?25l";
-static const char* SHOW_CURSOR = "\033[?25h";
+static const char* HIDE_CURSOR    = "\033[?25l";
+static const char* SHOW_CURSOR    = "\033[?25h";
 static const char* BLINK_BLOCK_CURSOR = "\033[1 q";
-static const char* CLEAR_SCREEN = "\033[2J";
-static const char* MOVE_HOME = "\033[H";
-static const char* COLOR_GRAY = "\033[90m";
-static const char* COLOR_RESET = "\033[0m";
+static const char* CLEAR_SCREEN   = "\033[2J";
+static const char* MOVE_HOME      = "\033[H";
+static const char* COLOR_GRAY     = "\033[90m";
+static const char* COLOR_RESET    = "\033[0m";
 
 // Terminal state
-static bool g_enabled = true;
-static bool g_initialized = false;
-static termios g_initial_state;
-static bool g_term_valid = false;
+static bool     g_enabled     = true;
+static bool     g_initialized = false;
+static termios  g_initial_state;
+static bool     g_term_valid  = false;
 
 // Bulk print state
 static bool g_suppress_render = false;
 
 // Input state
 static std::string g_input_buffer;
-static size_t g_cursor_pos = 0;
+static size_t      g_cursor_pos = 0;
 
 // Stats line
 static std::string g_stats_line;
 
-// Streaming buffer
-static std::string g_stream_buffer;
+// Streaming state
+// FIX: instead of one big string, we keep a "current line being built"
+// and push completed lines to g_output_buffer as they arrive.
+// This makes text appear token-by-token AND handles newlines correctly.
+static std::string g_stream_current_line;   // line currently being assembled
+static bool        g_streaming = false;     // true while model is generating
 
-// Get terminal size
+// ─────────────────────────────────────────────────────────────
+// Terminal helpers
+// ─────────────────────────────────────────────────────────────
+
 static int get_term_width() {
     struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0)
         return w.ws_col > 0 ? w.ws_col : 80;
-    }
     return 80;
 }
 
 static int get_term_height() {
     struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0)
         return w.ws_row > 0 ? w.ws_row : 24;
-    }
     return 24;
 }
 
@@ -68,60 +73,81 @@ static void clear_to_end() {
     printf("\033[K");
 }
 
+// FIX: always end the separator with COLOR_RESET so color never leaks out
 static void draw_separator() {
     int width = get_term_width();
     printf("%s", COLOR_GRAY);
-    for (int i = 0; i < width; i++) {
-        printf("─");
-    }
+    for (int i = 0; i < width; i++) printf("─");
     printf("%s", COLOR_RESET);
+    fflush(stdout);   // flush immediately so partial draws don't leave stale color
 }
 
 static void handle_resize(int /*signum*/) {
-    if (g_enabled && g_initialized) {
-        render();
+    if (g_enabled && g_initialized) render();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helper: split a string by \n and push each piece to the buffer
+// ─────────────────────────────────────────────────────────────
+static void push_text_to_buffer(const std::string& text) {
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t nl = text.find('\n', start);
+        if (nl == std::string::npos) {
+            // No newline: append to last line in buffer (or push new)
+            g_output_buffer.push_line(text.substr(start));
+            break;
+        } else {
+            g_output_buffer.push_line(text.substr(start, nl - start));
+            start = nl + 1;
+        }
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────
+
 void init() {
     if (g_initialized) return;
-    
+
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
-        g_enabled = false;
+        g_enabled     = false;
         g_initialized = true;
         return;
     }
-    
+
     if (tcgetattr(STDIN_FILENO, &g_initial_state) == 0) {
         g_term_valid = true;
         struct termios raw = g_initial_state;
         raw.c_lflag &= ~(ICANON | ECHO);
-        raw.c_cc[VMIN] = 1;
+        raw.c_cc[VMIN]  = 1;
         raw.c_cc[VTIME] = 0;
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
-    
+
     printf("%s%s", HIDE_CURSOR, BLINK_BLOCK_CURSOR);
     fflush(stdout);
-    
+
     signal(SIGWINCH, handle_resize);
     g_initialized = true;
 }
 
 void cleanup() {
     if (!g_initialized) return;
-    
-    if (g_term_valid) {
+
+    if (g_term_valid)
         tcsetattr(STDIN_FILENO, TCSANOW, &g_initial_state);
-    }
-    
-    printf("%s\n", SHOW_CURSOR);
+
+    // FIX: make sure color is reset before restoring cursor
+    printf("%s%s\n", COLOR_RESET, SHOW_CURSOR);
     fflush(stdout);
-    
-    g_enabled = false;
+
+    g_enabled     = false;
     g_initialized = false;
 }
 
+// FIX: use a dynamic buffer to avoid the 4096-byte truncation
 void print(const char* fmt, ...) {
     if (!g_enabled || !g_initialized) {
         va_list args;
@@ -131,36 +157,74 @@ void print(const char* fmt, ...) {
         fflush(stdout);
         return;
     }
-    
-    va_list args;
+
+    // Try stack buffer first, fall back to heap if needed
+    char   stack_buf[4096];
+    char*  buf     = stack_buf;
+    size_t buf_len = sizeof(stack_buf);
+
+    va_list args, args2;
     va_start(args, fmt);
-    char buffer[4096];
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_copy(args2, args);
+    int needed = vsnprintf(stack_buf, buf_len, fmt, args);
     va_end(args);
-    
-    g_output_buffer.push_line(buffer);
+
+    std::string heap_buf;
+    if (needed >= (int)buf_len) {
+        heap_buf.resize(needed + 1);
+        vsnprintf(&heap_buf[0], heap_buf.size(), fmt, args2);
+        buf = &heap_buf[0];
+    }
+    va_end(args2);
+
+    // FIX: split by newlines so each logical line is a separate buffer entry
+    push_text_to_buffer(buf);
     if (!g_suppress_render) render();
 }
 
 void begin_bulk_print() { g_suppress_render = true; }
-void end_bulk_print() { g_suppress_render = false; render(); }
+void end_bulk_print()   { g_suppress_render = false; render(); }
 
+// FIX: print_stream now processes tokens as they arrive.
+// - Appends to g_stream_current_line
+// - Whenever a '\n' is encountered, the completed line is committed to
+//   g_output_buffer and rendering happens immediately so the user sees
+//   text appear token-by-token.
 void print_stream(const char* text) {
     if (!g_enabled || !g_initialized) {
         printf("%s", text);
         fflush(stdout);
         return;
     }
-    g_stream_buffer += text;
+
+    g_streaming = true;
+
+    for (const char* p = text; *p; ++p) {
+        if (*p == '\n') {
+            // Commit the completed line to the buffer and show it
+            g_output_buffer.push_line(g_stream_current_line);
+            g_stream_current_line.clear();
+            if (!g_suppress_render) render();
+        } else {
+            g_stream_current_line += *p;
+            // Render on every character so the user sees tokens appear live.
+            // If this is too slow on your hardware you can render every N chars:
+            //   if (g_stream_current_line.size() % 4 == 0) render();
+            if (!g_suppress_render) render();
+        }
+    }
 }
 
+// FIX: flush_stream commits whatever partial line is still in the buffer
 void flush_stream() {
     if (!g_enabled || !g_initialized) return;
-    if (!g_stream_buffer.empty()) {
-        g_output_buffer.push_line(g_stream_buffer);
-        g_stream_buffer.clear();
-        render();
+
+    if (!g_stream_current_line.empty()) {
+        g_output_buffer.push_line(g_stream_current_line);
+        g_stream_current_line.clear();
     }
+    g_streaming = false;
+    render();
 }
 
 std::string read_input() {
@@ -168,27 +232,26 @@ std::string read_input() {
         printf("> ");
         fflush(stdout);
         std::string line;
-        if (std::getline(std::cin, line)) {
-            return line;
-        }
+        if (std::getline(std::cin, line)) return line;
         return "";
     }
-    
+
     g_input_buffer.clear();
     g_cursor_pos = 0;
     render();
-    
+
     while (true) {
         char c;
         ssize_t n = read(STDIN_FILENO, &c, 1);
         if (n <= 0) break;
-        
+
         if (c == 27) {
             char seq[4];
             ssize_t n1 = read(STDIN_FILENO, &seq[0], 1);
             if (n1 == 1 && seq[0] == '[') {
                 ssize_t n2 = read(STDIN_FILENO, &seq[1], 1);
                 if (n2 == 1) {
+                    // Mouse events — discard and re-render
                     if (seq[1] == 'M' || seq[1] == '<') {
                         if (seq[1] == 'M') read(STDIN_FILENO, &seq[2], 3);
                         else {
@@ -200,33 +263,34 @@ std::string read_input() {
                         render();
                         continue;
                     }
+                    // Page Up/Down → Home/End of input
                     if (seq[1] == '5' || seq[1] == '6') {
                         read(STDIN_FILENO, &seq[2], 1);
                         if (seq[2] == '~') {
-                            if (seq[1] == '5' && g_cursor_pos > 0) { g_cursor_pos = 0; render(); }
-                            else if (seq[1] == '6' && g_cursor_pos < g_input_buffer.size()) { g_cursor_pos = g_input_buffer.size(); render(); }
+                            if (seq[1] == '5') { g_cursor_pos = 0; render(); }
+                            else               { g_cursor_pos = g_input_buffer.size(); render(); }
                             continue;
                         }
                     }
-                    if (seq[1] == 'C' && g_cursor_pos < g_input_buffer.size()) { g_cursor_pos++; render(); }
-                    else if (seq[1] == 'D' && g_cursor_pos > 0) { g_cursor_pos--; render(); }
+                    if      (seq[1] == 'C' && g_cursor_pos < g_input_buffer.size()) { g_cursor_pos++; render(); }
+                    else if (seq[1] == 'D' && g_cursor_pos > 0)                     { g_cursor_pos--; render(); }
                     else if (seq[1] == '3' && g_cursor_pos < g_input_buffer.size()) {
                         g_input_buffer.erase(g_cursor_pos, 1);
                         render();
-                        read(STDIN_FILENO, &seq[2], 1);
+                        read(STDIN_FILENO, &seq[2], 1); // consume '~'
                     }
                 }
             }
             continue;
         }
-        
-        if (c == 0 || c == 127) {
+
+        if (c == 0 || c == 127) {   // Backspace
             if (g_cursor_pos > 0) { g_cursor_pos--; g_input_buffer.erase(g_cursor_pos, 1); render(); }
             continue;
         }
         if (c == '\n' || c == '\r') break;
-        if (c == 3) { g_input_buffer.clear(); break; }
-        if (c == 12) { g_output_buffer.clear(); render(); continue; }
+        if (c == 3)  { g_input_buffer.clear(); break; }        // Ctrl-C
+        if (c == 12) { g_output_buffer.clear(); render(); continue; } // Ctrl-L clear
         if (c >= 32 && c < 127) {
             g_input_buffer.insert(g_cursor_pos, 1, c);
             g_cursor_pos++;
@@ -238,69 +302,73 @@ std::string read_input() {
 
 void render() {
     if (!g_enabled || !g_initialized) return;
-    
+
     int term_height = get_term_height();
-    int term_width = get_term_width();
-    
-    // Get ALL output lines
+    int term_width  = get_term_width();
+    (void)term_width;
+
+    // ── Collect lines ──────────────────────────────────────────
+    // During streaming, append the partial current line as a "live" entry
     auto all_lines = g_output_buffer.get_visible_lines(0);
-    int total_lines = all_lines.size();
-    
-    // Calculate how many lines we can show while keeping 4 lines for UI
-    // (separator, input, separator, stats)
-    int ui_lines = 4;
+    if (g_streaming && !g_stream_current_line.empty()) {
+        all_lines.push_back(g_stream_current_line);
+    }
+    int total_lines = (int)all_lines.size();
+
+    // 4 fixed UI rows: separator, input, separator, stats
+    int ui_lines   = 4;
     int max_output = term_height - ui_lines;
     if (max_output < 1) max_output = 1;
-    
-    // Clear screen
-    printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
-    
-    // If we have more lines than fit, show the LAST max_output lines
+
+    // ── Clear & redraw ─────────────────────────────────────────
+    // FIX: always emit COLOR_RESET before clearing so stale ANSI from the
+    // previous frame doesn't bleed into the new frame.
+    printf("%s%s%s", COLOR_RESET, CLEAR_SCREEN, MOVE_HOME);
+
     int start_idx = (total_lines > max_output) ? (total_lines - max_output) : 0;
-    
-    // Print output lines
+
     int row = 1;
     for (int i = start_idx; i < total_lines && row <= max_output; i++, row++) {
         move_cursor(row, 1);
         clear_to_end();
-        printf("%s", all_lines[i].c_str());
+        // FIX: reset color before each line so ANSI codes in one line
+        // don't bleed into the next
+        printf("%s%s", COLOR_RESET, all_lines[i].c_str());
+        // Always close any color the line may have opened
+        printf("%s", COLOR_RESET);
     }
-    
-    // UI at bottom
-    int ui_start_row = term_height - 3;  // Start of UI area
-    
-    // Separator + Input (row term_height-3)
+
+    // ── UI bar ─────────────────────────────────────────────────
     move_cursor(term_height - 3, 1);
     clear_to_end();
     draw_separator();
-    
+
     move_cursor(term_height - 2, 1);
     clear_to_end();
-    printf("> %s", g_input_buffer.c_str());
-    move_cursor(term_height - 2, 3 + g_cursor_pos);
-    
-    // Separator + Stats (row term_height-1 and term_height)
+    // FIX: reset color before the input prompt so it's always white
+    printf("%s> %s", COLOR_RESET, g_input_buffer.c_str());
+    // Position cursor correctly (accounting for "> " prefix = 2 chars)
+    move_cursor(term_height - 2, 3 + (int)g_cursor_pos);
+
     move_cursor(term_height - 1, 1);
     clear_to_end();
     draw_separator();
-    
+
     move_cursor(term_height, 1);
     clear_to_end();
     if (!g_stats_line.empty()) {
-        printf("%s", g_stats_line.c_str());
+        printf("%s%s", COLOR_RESET, g_stats_line.c_str());
     }
-    
+
     fflush(stdout);
 }
 
-bool is_enabled() { return g_enabled; }
-
+bool is_enabled()           { return g_enabled; }
 void set_enabled(bool enabled) {
     g_enabled = enabled;
     if (enabled) render();
 }
-
-void force_redraw() { render(); }
+void force_redraw()         { render(); }
 
 void set_stats_line(const char* text) {
     if (!g_enabled || !g_initialized) return;
@@ -311,12 +379,13 @@ void set_stats_line(const char* text) {
     draw_separator();
     move_cursor(term_height, 1);
     clear_to_end();
-    if (!g_stats_line.empty()) {
-        printf("%s", g_stats_line.c_str());
-    }
+    if (!g_stats_line.empty())
+        printf("%s%s", COLOR_RESET, g_stats_line.c_str());
     fflush(stdout);
 }
 
-void scroll_output(int /*lines*/) {}
+void scroll_output(int /*lines*/) {
+    // TODO: implement real scroll by adjusting a viewport offset in output_buffer
+}
 
 }  // namespace cli_tui
