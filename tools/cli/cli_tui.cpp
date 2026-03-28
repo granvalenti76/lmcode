@@ -36,10 +36,12 @@ static bool g_suppress_render = false;
 // Input state
 static std::string g_input_buffer;
 static size_t g_cursor_pos = 0;
-static int g_input_row = 0;
 
 // Stats line
 static std::string g_stats_line;
+
+// Streaming buffer
+static std::string g_stream_buffer;
 
 // Get terminal size
 static int get_term_width() {
@@ -66,77 +68,13 @@ static void clear_to_end() {
     printf("\033[K");
 }
 
-static void draw_separator(int row, int width) {
-    move_cursor(row, 1);
+static void draw_separator() {
+    int width = get_term_width();
     printf("%s", COLOR_GRAY);
     for (int i = 0; i < width; i++) {
         printf("─");
     }
     printf("%s", COLOR_RESET);
-}
-
-static void render_output(int term_height, int /*term_width*/) {
-    // Layout:
-    // Rows 1 to (term_height-4): output
-    // Row (term_height-3): separator
-    // Row (term_height-2): input
-    // Row (term_height-1): separator
-    // Row term_height: stats
-    
-    int output_rows = term_height - 4;
-    if (output_rows < 1) output_rows = 1;
-
-    // Get ALL lines from buffer
-    auto all_lines = g_output_buffer.get_visible_lines(0);
-
-    // Clear screen
-    printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
-
-    int total = all_lines.size();
-
-    // Always show the LAST lines (most recent)
-    int line_offset = (total > output_rows) ? (total - output_rows) : 0;
-
-    // Print lines starting from row 1
-    for (int i = 0; i < output_rows && (line_offset + i) < total; i++) {
-        move_cursor(1 + i, 1);
-        clear_to_end();
-        printf("%s", all_lines[line_offset + i].c_str());
-    }
-
-    fflush(stdout);
-}
-
-void render() {
-    if (!g_enabled || !g_initialized) return;
-
-    int term_height = get_term_height();
-    int term_width = get_term_width();
-
-    // Render output first (rows 1 to term_height-4)
-    render_output(term_height, term_width);
-
-    // Separator above input (row term_height-3)
-    draw_separator(term_height - 3, term_width);
-
-    // Input box (row term_height-2)
-    g_input_row = term_height - 2;
-    move_cursor(g_input_row, 1);
-    clear_to_end();
-    printf("> %s", g_input_buffer.c_str());
-    move_cursor(g_input_row, 3 + g_cursor_pos);
-
-    // Separator above stats (row term_height-1)
-    draw_separator(term_height - 1, term_width);
-
-    // Stats (row term_height)
-    move_cursor(term_height, 1);
-    clear_to_end();
-    if (!g_stats_line.empty()) {
-        printf("%s", g_stats_line.c_str());
-    }
-
-    fflush(stdout);
 }
 
 static void handle_resize(int /*signum*/) {
@@ -167,7 +105,6 @@ void init() {
     fflush(stdout);
     
     signal(SIGWINCH, handle_resize);
-    
     g_initialized = true;
 }
 
@@ -194,23 +131,19 @@ void print(const char* fmt, ...) {
         fflush(stdout);
         return;
     }
-
+    
     va_list args;
     va_start(args, fmt);
     char buffer[4096];
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-
+    
     g_output_buffer.push_line(buffer);
     if (!g_suppress_render) render();
 }
 
-// Bulk print support (for startup logo)
 void begin_bulk_print() { g_suppress_render = true; }
 void end_bulk_print() { g_suppress_render = false; render(); }
-
-// Streaming buffer (shared between print_stream and flush_stream)
-static std::string g_stream_buffer;
 
 void print_stream(const char* text) {
     if (!g_enabled || !g_initialized) {
@@ -218,14 +151,11 @@ void print_stream(const char* text) {
         fflush(stdout);
         return;
     }
-
     g_stream_buffer += text;
-    // Non flushiamo qui - solo alla fine della generazione
 }
 
 void flush_stream() {
     if (!g_enabled || !g_initialized) return;
-
     if (!g_stream_buffer.empty()) {
         g_output_buffer.push_line(g_stream_buffer);
         g_stream_buffer.clear();
@@ -270,28 +200,17 @@ std::string read_input() {
                         render();
                         continue;
                     }
-                    
                     if (seq[1] == '5' || seq[1] == '6') {
                         read(STDIN_FILENO, &seq[2], 1);
                         if (seq[2] == '~') {
-                            if (seq[1] == '5' && g_cursor_pos > 0) {
-                                g_cursor_pos = 0;
-                                render();
-                            } else if (seq[1] == '6' && g_cursor_pos < g_input_buffer.size()) {
-                                g_cursor_pos = g_input_buffer.size();
-                                render();
-                            }
+                            if (seq[1] == '5' && g_cursor_pos > 0) { g_cursor_pos = 0; render(); }
+                            else if (seq[1] == '6' && g_cursor_pos < g_input_buffer.size()) { g_cursor_pos = g_input_buffer.size(); render(); }
                             continue;
                         }
                     }
-                    
-                    if (seq[1] == 'C' && g_cursor_pos < g_input_buffer.size()) {
-                        g_cursor_pos++;
-                        render();
-                    } else if (seq[1] == 'D' && g_cursor_pos > 0) {
-                        g_cursor_pos--;
-                        render();
-                    } else if (seq[1] == '3' && g_cursor_pos < g_input_buffer.size()) {
+                    if (seq[1] == 'C' && g_cursor_pos < g_input_buffer.size()) { g_cursor_pos++; render(); }
+                    else if (seq[1] == 'D' && g_cursor_pos > 0) { g_cursor_pos--; render(); }
+                    else if (seq[1] == '3' && g_cursor_pos < g_input_buffer.size()) {
                         g_input_buffer.erase(g_cursor_pos, 1);
                         render();
                         read(STDIN_FILENO, &seq[2], 1);
@@ -302,26 +221,76 @@ std::string read_input() {
         }
         
         if (c == 0 || c == 127) {
-            if (g_cursor_pos > 0) {
-                g_cursor_pos--;
-                g_input_buffer.erase(g_cursor_pos, 1);
-                render();
-            }
+            if (g_cursor_pos > 0) { g_cursor_pos--; g_input_buffer.erase(g_cursor_pos, 1); render(); }
             continue;
         }
-        
         if (c == '\n' || c == '\r') break;
         if (c == 3) { g_input_buffer.clear(); break; }
         if (c == 12) { g_output_buffer.clear(); render(); continue; }
-        
         if (c >= 32 && c < 127) {
             g_input_buffer.insert(g_cursor_pos, 1, c);
             g_cursor_pos++;
             render();
         }
     }
-    
     return g_input_buffer;
+}
+
+void render() {
+    if (!g_enabled || !g_initialized) return;
+    
+    int term_height = get_term_height();
+    int term_width = get_term_width();
+    
+    // Get ALL output lines
+    auto all_lines = g_output_buffer.get_visible_lines(0);
+    int total_lines = all_lines.size();
+    
+    // Calculate how many lines we can show while keeping 4 lines for UI
+    // (separator, input, separator, stats)
+    int ui_lines = 4;
+    int max_output = term_height - ui_lines;
+    if (max_output < 1) max_output = 1;
+    
+    // Clear screen
+    printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
+    
+    // If we have more lines than fit, show the LAST max_output lines
+    int start_idx = (total_lines > max_output) ? (total_lines - max_output) : 0;
+    
+    // Print output lines
+    int row = 1;
+    for (int i = start_idx; i < total_lines && row <= max_output; i++, row++) {
+        move_cursor(row, 1);
+        clear_to_end();
+        printf("%s", all_lines[i].c_str());
+    }
+    
+    // UI at bottom
+    int ui_start_row = term_height - 3;  // Start of UI area
+    
+    // Separator + Input (row term_height-3)
+    move_cursor(term_height - 3, 1);
+    clear_to_end();
+    draw_separator();
+    
+    move_cursor(term_height - 2, 1);
+    clear_to_end();
+    printf("> %s", g_input_buffer.c_str());
+    move_cursor(term_height - 2, 3 + g_cursor_pos);
+    
+    // Separator + Stats (row term_height-1 and term_height)
+    move_cursor(term_height - 1, 1);
+    clear_to_end();
+    draw_separator();
+    
+    move_cursor(term_height, 1);
+    clear_to_end();
+    if (!g_stats_line.empty()) {
+        printf("%s", g_stats_line.c_str());
+    }
+    
+    fflush(stdout);
 }
 
 bool is_enabled() { return g_enabled; }
@@ -337,8 +306,9 @@ void set_stats_line(const char* text) {
     if (!g_enabled || !g_initialized) return;
     g_stats_line = text ? text : "";
     int term_height = get_term_height();
-    int term_width = get_term_width();
-    draw_separator(term_height - 1, term_width);
+    move_cursor(term_height - 1, 1);
+    clear_to_end();
+    draw_separator();
     move_cursor(term_height, 1);
     clear_to_end();
     if (!g_stats_line.empty()) {
@@ -347,8 +317,6 @@ void set_stats_line(const char* text) {
     fflush(stdout);
 }
 
-void scroll_output(int /*lines*/) {
-    // Disabled - no scrolling, show everything
-}
+void scroll_output(int /*lines*/) {}
 
 }  // namespace cli_tui
