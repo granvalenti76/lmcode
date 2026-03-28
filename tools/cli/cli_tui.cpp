@@ -24,6 +24,94 @@ static const char* MOVE_HOME      = "\033[H";
 static const char* COLOR_GRAY     = "\033[90m";
 static const char* COLOR_RESET    = "\033[0m";
 
+// ─────────────────────────────────────────────────────────────
+// Word-wrap helpers
+// ─────────────────────────────────────────────────────────────
+
+// Returns the visible (printed) length of a string, skipping ANSI escapes.
+static int visible_len(const std::string& s) {
+    int len = 0;
+    bool in_esc = false;
+    for (size_t i = 0; i < s.size(); ) {
+        unsigned char c = (unsigned char)s[i];
+        if (in_esc) {
+            // ESC sequences end at a letter (@ through ~)
+            if (c >= 0x40 && c <= 0x7E) in_esc = false;
+            i++;
+        } else if (c == 0x1B) {
+            in_esc = true;
+            i++;
+        } else if (c >= 0x80) {
+            // UTF-8 multi-byte: count as 1 visible char
+            if      ((c & 0xF0) == 0xF0) i += 4;
+            else if ((c & 0xE0) == 0xE0) i += 3;
+            else if ((c & 0xC0) == 0xC0) i += 2;
+            else                          i += 1;
+            len++;
+        } else {
+            i++;
+            len++;
+        }
+    }
+    return len;
+}
+
+// Split a single logical line into screen-width chunks for rendering.
+// Preserves ANSI codes (they don't count toward width).
+// Each chunk gets COLOR_RESET appended so colors never bleed into the next row.
+static std::vector<std::string> wrap_line(const std::string& line, int width) {
+    std::vector<std::string> result;
+    if (width <= 0) width = 80;
+
+    std::string current;
+    int vis = 0;
+    bool in_esc = false;
+
+    for (size_t i = 0; i < line.size(); ) {
+        unsigned char c = (unsigned char)line[i];
+
+        if (in_esc) {
+            current += (char)c;
+            if (c >= 0x40 && c <= 0x7E) in_esc = false;
+            i++;
+        } else if (c == 0x1B) {
+            current += (char)c;
+            in_esc = true;
+            i++;
+        } else if (c >= 0x80) {
+            // UTF-8 multi-byte char
+            size_t char_len = 1;
+            if      ((c & 0xF0) == 0xF0) char_len = 4;
+            else if ((c & 0xE0) == 0xE0) char_len = 3;
+            else if ((c & 0xC0) == 0xC0) char_len = 2;
+
+            if (vis >= width) {
+                result.push_back(current + COLOR_RESET);
+                current.clear();
+                vis = 0;
+            }
+            for (size_t j = 0; j < char_len && i + j < line.size(); j++)
+                current += line[i + j];
+            vis++;
+            i += char_len;
+        } else {
+            if (vis >= width) {
+                result.push_back(current + COLOR_RESET);
+                current.clear();
+                vis = 0;
+            }
+            current += (char)c;
+            vis++;
+            i++;
+        }
+    }
+
+    if (!current.empty() || result.empty())
+        result.push_back(current + COLOR_RESET);
+
+    return result;
+}
+
 // Terminal state
 static bool     g_enabled     = true;
 static bool     g_initialized = false;
@@ -325,17 +413,21 @@ void render() {
     // previous frame doesn't bleed into the new frame.
     printf("%s%s%s", COLOR_RESET, CLEAR_SCREEN, MOVE_HOME);
 
-    int start_idx = (total_lines > max_output) ? (total_lines - max_output) : 0;
+    // Expand logical lines → wrapped screen-lines respecting term_width
+    std::vector<std::string> screen_lines;
+    screen_lines.reserve(total_lines);
+    for (int i = 0; i < total_lines; i++) {
+        auto wrapped = wrap_line(all_lines[i], term_width);
+        for (auto& w : wrapped) screen_lines.push_back(std::move(w));
+    }
+    int total_screen = (int)screen_lines.size();
+    int start_idx = (total_screen > max_output) ? (total_screen - max_output) : 0;
 
     int row = 1;
-    for (int i = start_idx; i < total_lines && row <= max_output; i++, row++) {
+    for (int i = start_idx; i < total_screen && row <= max_output; i++, row++) {
         move_cursor(row, 1);
         clear_to_end();
-        // FIX: reset color before each line so ANSI codes in one line
-        // don't bleed into the next
-        printf("%s%s", COLOR_RESET, all_lines[i].c_str());
-        // Always close any color the line may have opened
-        printf("%s", COLOR_RESET);
+        printf("%s%s", COLOR_RESET, screen_lines[i].c_str());
     }
 
     // ── UI bar ─────────────────────────────────────────────────
