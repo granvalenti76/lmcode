@@ -220,14 +220,7 @@ void print_stream(const char* text) {
     }
 
     g_stream_buffer += text;
-
-    // Flush ogni 256 caratteri
-    const int FLUSH_EVERY = 256;
-    if (g_stream_buffer.size() >= FLUSH_EVERY) {
-        g_output_buffer.push_line(g_stream_buffer);
-        g_stream_buffer.clear();
-        render();
-    }
+    // Non flushiamo qui - solo alla fine della generazione
 }
 
 void flush_stream() {
