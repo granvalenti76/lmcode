@@ -30,6 +30,9 @@ static bool g_initialized = false;
 static termios g_initial_state;
 static bool g_term_valid = false;
 
+// Bulk print state
+static bool g_suppress_render = false;
+
 // Input state
 static std::string g_input_buffer;
 static size_t g_cursor_pos = 0;
@@ -191,16 +194,23 @@ void print(const char* fmt, ...) {
         fflush(stdout);
         return;
     }
-    
+
     va_list args;
     va_start(args, fmt);
     char buffer[4096];
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-    
+
     g_output_buffer.push_line(buffer);
-    render();
+    if (!g_suppress_render) render();
 }
+
+// Bulk print support (for startup logo)
+void begin_bulk_print() { g_suppress_render = true; }
+void end_bulk_print() { g_suppress_render = false; render(); }
+
+// Streaming buffer (shared between print_stream and flush_stream)
+static std::string g_stream_buffer;
 
 void print_stream(const char* text) {
     if (!g_enabled || !g_initialized) {
@@ -208,25 +218,24 @@ void print_stream(const char* text) {
         fflush(stdout);
         return;
     }
-    
-    static std::string stream_buf;
-    stream_buf += text;
-    
+
+    g_stream_buffer += text;
+
+    // Flush ogni 256 caratteri
     const int FLUSH_EVERY = 256;
-    if (stream_buf.size() >= FLUSH_EVERY) {
-        g_output_buffer.push_line(stream_buf);
-        stream_buf.clear();
+    if (g_stream_buffer.size() >= FLUSH_EVERY) {
+        g_output_buffer.push_line(g_stream_buffer);
+        g_stream_buffer.clear();
         render();
     }
 }
 
 void flush_stream() {
     if (!g_enabled || !g_initialized) return;
-    
-    static std::string stream_buf;
-    if (!stream_buf.empty()) {
-        g_output_buffer.push_line(stream_buf);
-        stream_buf.clear();
+
+    if (!g_stream_buffer.empty()) {
+        g_output_buffer.push_line(g_stream_buffer);
+        g_stream_buffer.clear();
         render();
     }
 }

@@ -26,6 +26,10 @@ void cleanup();
 // This replaces console::log() when TUI is enabled
 void print(const char* fmt, ...);
 
+// Bulk print support (for startup logo)
+void begin_bulk_print();
+void end_bulk_print();
+
 // Print without newline (for streaming output)
 // Accumulates in a buffer until flush() is called
 void print_stream(const char* text);

@@ -931,6 +931,7 @@ int main(int argc, char ** argv) {
 
     // Print startup info (logo, model info, commands)
     if (cli_tui::is_enabled()) {
+        cli_tui::begin_bulk_print();  // Suppress render during bulk print
         cli_tui::print("\n");
         cli_tui::print("%s\n", LLAMA_ASCII_LOGO);
         cli_tui::print("build      : %s\n", inf.build_info.c_str());
@@ -962,8 +963,7 @@ int main(int argc, char ** argv) {
         }
         cli_tui::print("  /read <file>    add text file\n");
         cli_tui::print("\n");
-        // Force initial render to show logo
-        cli_tui::force_redraw();
+        cli_tui::end_bulk_print();  // Render everything at once
     } else {
         console::log("\n");
         console::log("%s\n", LLAMA_ASCII_LOGO);
