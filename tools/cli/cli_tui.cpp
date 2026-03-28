@@ -18,12 +18,14 @@ namespace cli_tui {
 // ANSI escape codes
 static const char* HIDE_CURSOR = "\033[?25l";
 static const char* SHOW_CURSOR = "\033[?25h";
+static const char* BLINK_BLOCK_CURSOR = "\033[1 q";  // Blinking block
 static const char* CLEAR_SCREEN = "\033[2J";
 static const char* MOVE_HOME = "\033[H";
 static const char* COLOR_GRAY = "\033[90m";
 static const char* COLOR_GREEN = "\033[32m";
 static const char* COLOR_BOLD = "\033[1m";
 static const char* COLOR_RESET = "\033[0m";
+static const char* COLOR_REVERSE = "\033[7m";
 
 // Terminal state
 static bool g_enabled = true;
@@ -38,6 +40,7 @@ static int g_input_row = 0;  // Row where input box is drawn
 
 // Render state
 static bool g_needs_redraw = true;
+static int g_scroll_offset = 0;  // How many lines scrolled from bottom
 
 // Streaming output buffer (accumulates tokens before printing)
 static std::string g_stream_buffer;
@@ -101,8 +104,8 @@ static void draw_input_box(int term_height, int term_width) {
     fflush(stdout);
 }
 
-// Render the output buffer (only visible lines)
-static void render_output(int term_height, int /*term_width*/) {
+// Render the output buffer with scroll support
+static void render_output(int term_height, int term_width) {
     // Layout:
     // Rows 1 to (term_height-4): Output area
     // Row (term_height-3): Separator
@@ -112,22 +115,49 @@ static void render_output(int term_height, int /*term_width*/) {
     
     int output_rows = term_height - 4;
     if (output_rows < 1) output_rows = 1;
-    if (output_rows > 50) output_rows = 50;  // Cap at 50 rows to avoid excessive clearing
     
-    // Get visible lines from buffer (last N lines)
-    auto lines = g_output_buffer.get_visible_lines(output_rows);
+    // Get all lines from buffer
+    auto all_lines = g_output_buffer.get_visible_lines(g_output_buffer.size());
+    
+    // Calculate visible window based on scroll offset
+    int total_lines = all_lines.size();
+    int start_idx = 0;
+    int end_idx = total_lines;
+    
+    if (total_lines > output_rows) {
+        // Scroll from bottom (g_scroll_offset = 0 means show latest)
+        start_idx = total_lines - output_rows - g_scroll_offset;
+        if (start_idx < 0) start_idx = 0;
+        end_idx = start_idx + output_rows;
+        
+        // Adjust scroll offset if content is shorter
+        if (start_idx > 0 && total_lines - start_idx < output_rows) {
+            start_idx = total_lines - output_rows;
+        }
+    }
     
     // Clear screen and move home
     printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
     
-    // Print each line at its position (top-aligned)
+    // Print visible lines
     int row = 1;
-    for (const auto& line : lines) {
-        if (row > output_rows) break;
+    for (int i = start_idx; i < end_idx && row <= output_rows; i++) {
         move_cursor(row, 1);
         clear_to_end();
-        printf("%s", line.c_str());
+        printf("%s", all_lines[i].c_str());
         row++;
+    }
+    
+    // Show scroll indicators
+    if (start_idx > 0) {
+        // Show "▲ more above" indicator
+        move_cursor(1, term_width - 15);
+        printf("%s▲ more ▲%s", COLOR_REVERSE, COLOR_RESET);
+    }
+    if (end_idx < total_lines) {
+        // Show "▼ more below" indicator
+        move_cursor(output_rows, term_width - 15);
+        printf("%s▼ more ▼%s", COLOR_REVERSE, COLOR_RESET);
     }
     
     fflush(stdout);
@@ -174,8 +204,8 @@ void init() {
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
     
-    // Hide cursor
-    printf("%s", HIDE_CURSOR);
+    // Hide cursor and set blinking block cursor
+    printf("%s%s", HIDE_CURSOR, BLINK_BLOCK_CURSOR);
     fflush(stdout);
     
     // Setup signal handler for resize
@@ -249,6 +279,7 @@ void flush_stream() {
         g_output_buffer.push_line(g_stream_buffer);
         g_stream_buffer.clear();
         g_needs_redraw = true;
+        g_scroll_offset = 0;  // Reset scroll to bottom when new content arrives
         render();
     }
 }
@@ -303,6 +334,19 @@ std::string read_input() {
                     
                     seq[2] = '\0';
 
+                    // Handle multi-byte sequences (PageUp/PageDown)
+                    if (seq[1] == '5' || seq[1] == '6') {
+                        ssize_t n3 = read(STDIN_FILENO, &seq[2], 1);
+                        if (n3 == 1 && seq[2] == '~') {
+                            if (seq[1] == '5') {  // PageUp - scroll up (show older content)
+                                scroll_output(-10);
+                            } else if (seq[1] == '6') {  // PageDown - scroll down (show newer content)
+                                scroll_output(10);
+                            }
+                            continue;
+                        }
+                    }
+
                     switch (seq[1]) {
                         case 'C':  // Right arrow
                             if (g_cursor_pos < g_input_buffer.size()) {
@@ -322,6 +366,10 @@ std::string read_input() {
                                 render();
                             }
                             read(STDIN_FILENO, &seq[2], 1);  // Read trailing '~'
+                            break;
+                        case '5':  // PageUp (already handled above)
+                            break;
+                        case '6':  // PageDown (already handled above)
                             break;
                     }
                 }
@@ -412,6 +460,22 @@ void set_stats_line(const char* text) {
     int term_width = get_term_width();
     draw_separator(term_height - 1, term_width);
     draw_stats_line(term_height, term_width);
+}
+
+void scroll_output(int lines) {
+    if (!g_enabled || !g_initialized) return;
+    
+    g_scroll_offset += lines;
+    if (g_scroll_offset < 0) g_scroll_offset = 0;
+    
+    // Cap scroll offset to prevent scrolling into void
+    auto all_lines = g_output_buffer.get_visible_lines(g_output_buffer.size());
+    int term_height = get_term_height();
+    int output_rows = term_height - 4;
+    int max_scroll = static_cast<int>(all_lines.size()) - output_rows;
+    if (g_scroll_offset > max_scroll) g_scroll_offset = max_scroll;
+    
+    render();
 }
 
 }  // namespace cli_tui

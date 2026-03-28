@@ -53,4 +53,7 @@ void force_redraw();
 // Set the stats line text (displayed below input box)
 void set_stats_line(const char* text);
 
+// Scroll output up/down (positive = down, negative = up)
+void scroll_output(int lines);
+
 }  // namespace cli_tui
