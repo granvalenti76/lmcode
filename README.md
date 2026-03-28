@@ -3,8 +3,8 @@
 **lmcode** is an experimental fork of `llama.cpp` that transforms `llama-cli` into a native **Agentic Coding Environment**. It integrates tool-calling logic and real-time execution statistics directly into the C++ core, enabling autonomous coding workflows without HTTP/REST overhead.
 
 ---
-<img width="1332" height="744" alt="Screenshot 2026-03-26 alle 12 37 35" src="https://github.com/user-attachments/assets/80cf6fd4-029a-4abf-bf01-bba7adbe6365" />
-<img width="1332" height="744" alt="Screenshot 2026-03-26 alle 12 39 06" src="https://github.com/user-attachments/assets/39e29c8a-9037-4593-b64f-338e2cded495" />
+<img width="1332" height="742" alt="image" src="https://github.com/user-attachments/assets/82530631-d2e1-41cf-8dc8-9bbc1aa1a7bf" />
+<img width="1332" height="742" alt="image" src="https://github.com/user-attachments/assets/d93715a8-0a69-427d-8b90-8e320cfe18f8" />
 <img width="1332" height="742" alt="Screenshot 2026-03-26 alle 12 39 49" src="https://github.com/user-attachments/assets/ac15bb1a-1709-4092-89b3-1f2e4ab0ed4f" />
 <img width="1332" height="742" alt="Screenshot 2026-03-26 alle 12 42 45" src="https://github.com/user-attachments/assets/304668e5-76ff-486f-836c-629c8b5cf381" />
 
