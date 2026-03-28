@@ -43,6 +43,9 @@ static bool g_needs_redraw = true;
 static std::string g_stream_buffer;
 static const int STREAM_FLUSH_INTERVAL = 256;  // Flush every N characters
 
+// Stats line (displayed below input)
+static std::string g_stats_line;
+
 // Get terminal size
 static int get_term_width() {
     struct winsize w;
@@ -80,11 +83,11 @@ static void draw_separator(int row, int width) {
     printf("%s", COLOR_RESET);
 }
 
-// Draw the input box at the bottom
+// Draw the input box (second to last section)
 static void draw_input_box(int term_height, int term_width) {
-    g_input_row = term_height - 1;  // Second to last row
+    g_input_row = term_height - 2;  // Third to last row (stats is at bottom)
 
-    // Draw separator
+    // Draw separator above input
     draw_separator(g_input_row - 1, term_width);
 
     // Draw input prompt and content
@@ -98,25 +101,56 @@ static void draw_input_box(int term_height, int term_width) {
     fflush(stdout);
 }
 
-// Render the output buffer
-static void render_output(int /*term_height*/, int /*term_width*/) {
-    // Calculate how many lines we can show
-    int output_lines = g_input_row - 2;  // Leave room for separator and input
-    if (output_lines < 1) output_lines = 1;
+// Render the output buffer (only visible lines)
+static void render_output(int term_height, int /*term_width*/) {
+    // Layout:
+    // Rows 1 to (term_height-4): Output area
+    // Row (term_height-3): Separator
+    // Row (term_height-2): Input box
+    // Row (term_height-1): Separator  
+    // Row term_height: Stats line
     
-    // Get visible lines from buffer
-    auto lines = g_output_buffer.get_visible_lines(output_lines);
+    int output_rows = term_height - 4;
+    if (output_rows < 1) output_rows = 1;
+    
+    // Get visible lines from buffer (last N lines)
+    auto lines = g_output_buffer.get_visible_lines(output_rows);
+    
+    // Calculate starting row to center content if less than full screen
+    int start_row = 1;
+    if (lines.size() < static_cast<size_t>(output_rows)) {
+        // Content fits, start from top
+        start_row = 1;
+    }
     
     // Clear screen and move home
     printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
     
-    // Print each line
-    for (size_t i = 0; i < lines.size() && i < static_cast<size_t>(output_lines); i++) {
-        move_cursor(1 + i, 1);
+    // Print each line at its position
+    for (size_t i = 0; i < lines.size() && i < static_cast<size_t>(output_rows); i++) {
+        move_cursor(start_row + i, 1);
         clear_to_end();
         printf("%s", lines[i].c_str());
     }
     
+    // Clear any remaining output rows
+    for (size_t i = lines.size(); i < static_cast<size_t>(output_rows); i++) {
+        move_cursor(start_row + i, 1);
+        clear_to_end();
+    }
+    
+    fflush(stdout);
+}
+
+// Draw the stats line at the bottom
+static void draw_stats_line(int /*term_height*/, int /*term_width*/) {
+    int stats_row = get_term_height();
+    move_cursor(stats_row, 1);
+    clear_to_end();
+    
+    if (!g_stats_line.empty()) {
+        printf("%s", g_stats_line.c_str());
+    }
     fflush(stdout);
 }
 
@@ -329,16 +363,20 @@ std::string read_input() {
 
 void render() {
     if (!g_enabled || !g_initialized) return;
-    
+
     int term_height = get_term_height();
     int term_width = get_term_width();
-    
+
     // Render output
     render_output(term_height, term_width);
-    
-    // Draw input box
+
+    // Draw separator and input box
     draw_input_box(term_height, term_width);
-    
+
+    // Draw separator and stats line
+    draw_separator(term_height - 1, term_width);
+    draw_stats_line(term_height, term_width);
+
     g_needs_redraw = false;
 }
 
@@ -356,6 +394,17 @@ void set_enabled(bool enabled) {
 void force_redraw() {
     g_needs_redraw = true;
     render();
+}
+
+void set_stats_line(const char* text) {
+    if (!g_enabled || !g_initialized) return;
+    
+    g_stats_line = text ? text : "";
+    // Only redraw the stats line, not the whole screen
+    int term_height = get_term_height();
+    int term_width = get_term_width();
+    draw_separator(term_height - 1, term_width);
+    draw_stats_line(term_height, term_width);
 }
 
 }  // namespace cli_tui

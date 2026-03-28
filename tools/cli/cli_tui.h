@@ -50,4 +50,7 @@ void set_enabled(bool enabled);
 // Force a full screen redraw (e.g., after terminal resize)
 void force_redraw();
 
+// Set the stats line text (displayed below input box)
+void set_stats_line(const char* text);
+
 }  // namespace cli_tui

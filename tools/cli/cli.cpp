@@ -163,11 +163,11 @@ struct cli_context {
         }
     }
 
-    // Display status line
+    // Display status line (in stats bar at bottom)
     void display_status() {
         update_context_stats();
         if (cli_tui::is_enabled()) {
-            cli_tui::print("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
+            cli_tui::set_stats_line(cli_stats_display::format_status_line(stats).c_str());
         } else {
             console::log("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
             console::flush();
@@ -875,16 +875,30 @@ int main(int argc, char ** argv) {
     SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
 
-    console::log("\nLoading model... ");
+    // Loading model message
+    if (cli_tui::is_enabled()) {
+        cli_tui::print("\nLoading model... ");
+        cli_tui::force_redraw();
+    } else {
+        console::log("\nLoading model... ");
+    }
     console::spinner::start();
     if (!ctx_cli.ctx_server.load_model(params)) {
         console::spinner::stop();
-        console::error("\nFailed to load the model\n");
+        if (cli_tui::is_enabled()) {
+            cli_tui::print("\nFailed to load the model\n");
+        } else {
+            console::error("\nFailed to load the model\n");
+        }
         return 1;
     }
 
     console::spinner::stop();
-    console::log("\n");
+    if (cli_tui::is_enabled()) {
+        cli_tui::print("\n");
+    } else {
+        console::log("\n");
+    }
 
     std::thread inference_thread([&ctx_cli]() {
         ctx_cli.ctx_server.start_loop();
@@ -915,37 +929,74 @@ int main(int argc, char ** argv) {
     };
     add_system_prompt();
 
-    console::log("\n");
-    console::log("%s\n", LLAMA_ASCII_LOGO);
-    console::log("build      : %s\n", inf.build_info.c_str());
-    console::log("model      : %s\n", inf.model_name.c_str());
-    console::log("modalities : %s\n", modalities.c_str());
-    if (!params.system_prompt.empty()) {
-        console::log("system     : custom prompt\n");
+    // Print startup info (logo, model info, commands)
+    if (cli_tui::is_enabled()) {
+        cli_tui::print("\n");
+        cli_tui::print("%s\n", LLAMA_ASCII_LOGO);
+        cli_tui::print("build      : %s\n", inf.build_info.c_str());
+        cli_tui::print("model      : %s\n", inf.model_name.c_str());
+        cli_tui::print("modalities : %s\n", modalities.c_str());
+        if (!params.system_prompt.empty()) {
+            cli_tui::print("system     : custom prompt\n");
+        }
+        cli_tui::print("\n");
+        cli_tui::print("commands:\n");
+        cli_tui::print("  /exit, Ctrl+C   exit\n");
+        cli_tui::print("  /regen          regenerate last response\n");
+        cli_tui::print("  /clear          clear chat history\n");
+        cli_tui::print("  /cache          clear tool result cache\n");
+        cli_tui::print("  /plan           toggle plan mode (show plan before executing)\n");
+        cli_tui::print("  /auto <on|off>  enable/disable auto-execution\n");
+        cli_tui::print("  /stats          show detailed statistics\n");
+        cli_tui::print("  /thinking       toggle thinking mode\n");
+        cli_tui::print("  /debug          toggle debug mode (tool call logging)\n");
+        cli_tui::print("  /tui [on|off]   toggle TUI input mode (default: on)\n");
+        cli_tui::print("  /tools          list available tools\n");
+        cli_tui::print("  /tool <cmd>     tool management (add/remove/clear)\n");
+        cli_tui::print("  /help           show this help\n");
+        if (inf.has_inp_image) {
+            cli_tui::print("  /image <file>   add image\n");
+        }
+        if (inf.has_inp_audio) {
+            cli_tui::print("  /audio <file>   add audio\n");
+        }
+        cli_tui::print("  /read <file>    add text file\n");
+        cli_tui::print("\n");
+        // Force initial render to show logo
+        cli_tui::force_redraw();
+    } else {
+        console::log("\n");
+        console::log("%s\n", LLAMA_ASCII_LOGO);
+        console::log("build      : %s\n", inf.build_info.c_str());
+        console::log("model      : %s\n", inf.model_name.c_str());
+        console::log("modalities : %s\n", modalities.c_str());
+        if (!params.system_prompt.empty()) {
+            console::log("system     : custom prompt\n");
+        }
+        console::log("\n");
+        console::log("commands:\n");
+        console::log("  /exit, Ctrl+C   exit\n");
+        console::log("  /regen          regenerate last response\n");
+        console::log("  /clear          clear chat history\n");
+        console::log("  /cache          clear tool result cache\n");
+        console::log("  /plan           toggle plan mode (show plan before executing)\n");
+        console::log("  /auto <on|off>  enable/disable auto-execution\n");
+        console::log("  /stats          show detailed statistics\n");
+        console::log("  /thinking       toggle thinking mode\n");
+        console::log("  /debug          toggle debug mode (tool call logging)\n");
+        console::log("  /tui [on|off]   toggle TUI input mode (default: on)\n");
+        console::log("  /tools          list available tools\n");
+        console::log("  /tool <cmd>     tool management (add/remove/clear)\n");
+        console::log("  /help           show this help\n");
+        if (inf.has_inp_image) {
+            console::log("  /image <file>   add image\n");
+        }
+        if (inf.has_inp_audio) {
+            console::log("  /audio <file>   add audio\n");
+        }
+        console::log("  /read <file>    add text file\n");
+        console::log("\n");
     }
-    console::log("\n");
-    console::log("commands:\n");
-    console::log("  /exit, Ctrl+C   exit\n");
-    console::log("  /regen          regenerate last response\n");
-    console::log("  /clear          clear chat history\n");
-    console::log("  /cache          clear tool result cache\n");
-    console::log("  /plan           toggle plan mode (show plan before executing)\n");
-    console::log("  /auto <on|off>  enable/disable auto-execution\n");
-    console::log("  /stats          show detailed statistics\n");
-    console::log("  /thinking       toggle thinking mode\n");
-    console::log("  /debug          toggle debug mode (tool call logging)\n");
-    console::log("  /tui [on|off]   toggle TUI input mode (default: on)\n");
-    console::log("  /tools          list available tools\n");
-    console::log("  /tool <cmd>     tool management (add/remove/clear)\n");
-    console::log("  /help           show this help\n");
-    if (inf.has_inp_image) {
-        console::log("  /image <file>   add image\n");
-    }
-    if (inf.has_inp_audio) {
-        console::log("  /audio <file>   add audio\n");
-    }
-    console::log("  /read <file>    add text file\n");
-    console::log("\n");
 
     std::string cur_msg;
     while (true) {
