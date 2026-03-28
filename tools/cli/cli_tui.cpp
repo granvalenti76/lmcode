@@ -1,8 +1,10 @@
 #include "cli_tui.h"
+#include "output_buffer.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -16,98 +18,112 @@ namespace cli_tui {
 // ANSI escape codes
 static const char* HIDE_CURSOR = "\033[?25l";
 static const char* SHOW_CURSOR = "\033[?25h";
-static const char* BLINK_CURSOR_ON = "\033[?12h";
+static const char* CLEAR_SCREEN = "\033[2J";
+static const char* MOVE_HOME = "\033[H";
+static const char* COLOR_GRAY = "\033[90m";
+static const char* COLOR_GREEN = "\033[32m";
+static const char* COLOR_BOLD = "\033[1m";
+static const char* COLOR_RESET = "\033[0m";
 
 // Terminal state
-static bool g_enabled = false;
+static bool g_enabled = true;
 static bool g_initialized = false;
 static termios g_initial_state;
 static bool g_term_valid = false;
 
-// Input box state
+// Input state
 static std::string g_input_buffer;
 static size_t g_cursor_pos = 0;
-static int g_input_line_row = -1;  // Terminal row where input box is drawn
+static int g_input_row = 0;  // Row where input box is drawn
+
+// Render state
+static bool g_needs_redraw = true;
+
+// Streaming output buffer (accumulates tokens before printing)
+static std::string g_stream_buffer;
+static const int STREAM_FLUSH_INTERVAL = 256;  // Flush every N characters
 
 // Get terminal size
 static int get_term_width() {
     struct winsize w;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
-        return w.ws_col;
+        return w.ws_col > 0 ? w.ws_col : 80;
     }
-    return 80;  // Default
+    return 80;
 }
 
 static int get_term_height() {
     struct winsize w;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
-        return w.ws_row;
+        return w.ws_row > 0 ? w.ws_row : 24;
     }
-    return 24;  // Default
+    return 24;
 }
 
-// Move cursor to specific row
-static void move_to_row(int row) {
-    printf("\033[%d;1H", row + 1);  // 1-indexed
-    fflush(stdout);
+// Move cursor to specific position (1-indexed)
+static void move_cursor(int row, int col) {
+    printf("\033[%d;%dH", row, col);
 }
 
-// Move cursor to end of current line and clear to end
+// Clear from cursor to end of screen
 static void clear_to_end() {
-    printf("\033[K");
-    fflush(stdout);
+    printf("\033[J");
 }
 
-// Draw the input box at the bottom of the terminal
-static void draw_input_box() {
-    int term_height = get_term_height();
-    int term_width = get_term_width();
-    
-    // Input box is on the second-to-last line (last line is the separator)
-    int input_row = term_height - 2;
-    g_input_line_row = input_row;
-    
-    // Move to input row
-    move_to_row(input_row);
-    
-    // Draw separator line above input
-    printf("\033[%d;1H", input_row);  // Move to separator row
-    printf("\033[90m");
-    for (int i = 0; i < term_width; i++) {
+// Draw the separator line
+static void draw_separator(int row, int width) {
+    move_cursor(row, 1);
+    printf("%s", COLOR_GRAY);
+    for (int i = 0; i < width; i++) {
         printf("─");
     }
-    printf("\033[0m");
-    
-    // Move to input row and draw prompt + content
-    move_to_row(input_row + 1);
+    printf("%s", COLOR_RESET);
+}
+
+// Draw the input box at the bottom
+static void draw_input_box(int term_height, int term_width) {
+    g_input_row = term_height - 1;  // Second to last row
+
+    // Draw separator
+    draw_separator(g_input_row - 1, term_width);
+
+    // Draw input prompt and content
+    move_cursor(g_input_row, 1);
     clear_to_end();
-    
-    // Draw prompt
-    printf("\033[1;32m>\033[0m ");  // Green ">"
-    
-    // Draw input content
+    printf("%s%s> %s", COLOR_BOLD, COLOR_GREEN, COLOR_RESET);
     printf("%s", g_input_buffer.c_str());
-    
-    // Clear rest of line
-    clear_to_end();
-    
-    // Position cursor after the text
-    int cursor_col = 2 + g_cursor_pos;  // 2 for "> "
-    printf("\033[%d;%dH", input_row + 2, cursor_col + 1);  // 1-indexed row;col
+
+    // Position cursor
+    move_cursor(g_input_row, 3 + g_cursor_pos);
     fflush(stdout);
 }
 
-// Refresh the input display
-static void refresh_input() {
-    if (!g_enabled || !g_initialized) return;
+// Render the output buffer
+static void render_output(int /*term_height*/, int /*term_width*/) {
+    // Calculate how many lines we can show
+    int output_lines = g_input_row - 2;  // Leave room for separator and input
+    if (output_lines < 1) output_lines = 1;
     
-    draw_input_box();
+    // Get visible lines from buffer
+    auto lines = g_output_buffer.get_visible_lines(output_lines);
+    
+    // Clear screen and move home
+    printf("%s%s", CLEAR_SCREEN, MOVE_HOME);
+    
+    // Print each line
+    for (size_t i = 0; i < lines.size() && i < static_cast<size_t>(output_lines); i++) {
+        move_cursor(1 + i, 1);
+        clear_to_end();
+        printf("%s", lines[i].c_str());
+    }
+    
+    fflush(stdout);
 }
 
 // Handle terminal resize
 static void handle_resize(int /*signum*/) {
     if (g_enabled && g_initialized) {
-        refresh_input();
+        g_needs_redraw = true;
     }
 }
 
@@ -121,9 +137,6 @@ void init() {
         return;
     }
     
-    // Enable TUI by default
-    g_enabled = true;
-    
     // Save terminal state
     if (tcgetattr(STDIN_FILENO, &g_initial_state) == 0) {
         g_term_valid = true;
@@ -136,14 +149,18 @@ void init() {
         tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     }
     
-    // Hide cursor and enable blinking block cursor
-    printf("%s%s", HIDE_CURSOR, BLINK_CURSOR_ON);
+    // Hide cursor
+    printf("%s", HIDE_CURSOR);
     fflush(stdout);
     
     // Setup signal handler for resize
     signal(SIGWINCH, handle_resize);
     
     g_initialized = true;
+    g_needs_redraw = true;
+    
+    // Initial render
+    render();
 }
 
 void cleanup() {
@@ -154,12 +171,61 @@ void cleanup() {
         tcsetattr(STDIN_FILENO, TCSANOW, &g_initial_state);
     }
     
-    // Show cursor
-    printf("%s", SHOW_CURSOR);
+    // Show cursor and move to new line
+    printf("%s\n", SHOW_CURSOR);
     fflush(stdout);
     
     g_enabled = false;
     g_initialized = false;
+}
+
+void print(const char* fmt, ...) {
+    if (!g_enabled || !g_initialized) {
+        // Fallback to normal printf
+        va_list args;
+        va_start(args, fmt);
+        vprintf(fmt, args);
+        va_end(args);
+        fflush(stdout);
+        return;
+    }
+    
+    // Format and add to buffer
+    va_list args;
+    va_start(args, fmt);
+    char buffer[4096];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    
+    g_output_buffer.push_line(buffer);
+    g_needs_redraw = true;
+}
+
+void print_stream(const char* text) {
+    if (!g_enabled || !g_initialized) {
+        // Fallback to normal printf
+        printf("%s", text);
+        fflush(stdout);
+        return;
+    }
+    
+    g_stream_buffer += text;
+    
+    // Flush if buffer is large enough
+    if (g_stream_buffer.size() >= STREAM_FLUSH_INTERVAL) {
+        flush_stream();
+    }
+}
+
+void flush_stream() {
+    if (!g_enabled || !g_initialized) return;
+    
+    if (!g_stream_buffer.empty()) {
+        g_output_buffer.push_line(g_stream_buffer);
+        g_stream_buffer.clear();
+        g_needs_redraw = true;
+        render();
+    }
 }
 
 std::string read_input() {
@@ -176,9 +242,8 @@ std::string read_input() {
     
     g_input_buffer.clear();
     g_cursor_pos = 0;
-    
-    // Draw initial input box
-    draw_input_box();
+    g_needs_redraw = true;
+    render();  // Show input box
     
     // Read input character by character
     while (true) {
@@ -198,29 +263,24 @@ std::string read_input() {
                     seq[2] = '\0';
                     
                     switch (seq[1]) {
-                        case 'A':  // Up arrow - ignore
-                            break;
-                        case 'B':  // Down arrow - ignore
-                            break;
                         case 'C':  // Right arrow
                             if (g_cursor_pos < g_input_buffer.size()) {
                                 g_cursor_pos++;
-                                refresh_input();
+                                render();
                             }
                             break;
                         case 'D':  // Left arrow
                             if (g_cursor_pos > 0) {
                                 g_cursor_pos--;
-                                refresh_input();
+                                render();
                             }
                             break;
                         case '3':  // Delete key
                             if (g_cursor_pos < g_input_buffer.size()) {
                                 g_input_buffer.erase(g_cursor_pos, 1);
-                                refresh_input();
+                                render();
                             }
-                            // Read the trailing '~'
-                            read(STDIN_FILENO, &seq[2], 1);
+                            read(STDIN_FILENO, &seq[2], 1);  // Read trailing '~'
                             break;
                     }
                 }
@@ -233,7 +293,7 @@ std::string read_input() {
             if (g_cursor_pos > 0) {
                 g_cursor_pos--;
                 g_input_buffer.erase(g_cursor_pos, 1);
-                refresh_input();
+                render();
             }
             continue;
         }
@@ -251,9 +311,8 @@ std::string read_input() {
         
         // Handle Ctrl+L (clear screen)
         if (c == 12) {
-            printf("\033[2J\033[H");
-            fflush(stdout);
-            refresh_input();
+            g_output_buffer.clear();
+            render();
             continue;
         }
         
@@ -261,56 +320,26 @@ std::string read_input() {
         if (c >= 32 && c < 127) {  // Printable ASCII
             g_input_buffer.insert(g_cursor_pos, 1, c);
             g_cursor_pos++;
-            refresh_input();
+            render();
         }
     }
-    
-    // Move cursor down and show normal prompt for the response
-    printf("\033[%d;1H", g_input_line_row + 2);
-    printf("\n");
-    fflush(stdout);
     
     return g_input_buffer;
 }
 
-void clear_input_area() {
-    if (!g_enabled || !g_initialized || g_input_line_row < 0) return;
-    
-    // Clear the input line
-    move_to_row(g_input_line_row + 1);
-    clear_to_end();
-    
-    // Clear the separator line
-    move_to_row(g_input_line_row);
-    clear_to_end();
-    
-    fflush(stdout);
-}
-
-void scroll_output() {
+void render() {
     if (!g_enabled || !g_initialized) return;
     
-    // Move cursor to just above the input box and print newline
-    // This pushes the content up and keeps the input box at bottom
-    move_to_row(g_input_line_row - 1);
-    printf("\n");
+    int term_height = get_term_height();
+    int term_width = get_term_width();
     
-    // Redraw input box at bottom
-    draw_input_box();
-}
-
-void hide_for_generation() {
-    if (!g_enabled || !g_initialized) return;
+    // Render output
+    render_output(term_height, term_width);
     
-    // Clear the input box lines
-    clear_input_area();
-}
-
-void show_after_generation() {
-    if (!g_enabled || !g_initialized) return;
+    // Draw input box
+    draw_input_box(term_height, term_width);
     
-    // Redraw the input box
-    draw_input_box();
+    g_needs_redraw = false;
 }
 
 bool is_enabled() {
@@ -319,6 +348,14 @@ bool is_enabled() {
 
 void set_enabled(bool enabled) {
     g_enabled = enabled;
+    if (enabled) {
+        g_needs_redraw = true;
+    }
+}
+
+void force_redraw() {
+    g_needs_redraw = true;
+    render();
 }
 
 }  // namespace cli_tui

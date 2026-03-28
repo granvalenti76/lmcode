@@ -12,6 +12,7 @@
 #include "cli-tool-parser.h"
 #include "cli-stats.h"
 #include "cli_tui.h"
+#include "output_buffer.h"
 
 #include <array>
 #include <atomic>
@@ -165,8 +166,12 @@ struct cli_context {
     // Display status line
     void display_status() {
         update_context_stats();
-        console::log("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
-        console::flush();
+        if (cli_tui::is_enabled()) {
+            cli_tui::print("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
+        } else {
+            console::log("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
+            console::flush();
+        }
     }
 
     std::string generate_completion(result_timings & out_timings) {
@@ -222,9 +227,6 @@ struct cli_context {
                 console::set_display(DISPLAY_TYPE_RESET);
             }
 
-            // Hide TUI input box during generation
-            cli_tui::hide_for_generation();
-
             console::spinner::start();
             server_task_result_ptr result = rd.next(should_stop);
 
@@ -252,10 +254,14 @@ struct cli_context {
                         if (!diff.content_delta.empty()) {
                             // Add to history always
                             curr_content += diff.content_delta;
-                            
+
                             // Print content (debug mode shows everything including reasoning)
-                            console::log("%s", diff.content_delta.c_str());
-                            console::flush();
+                            if (cli_tui::is_enabled()) {
+                                cli_tui::print_stream(diff.content_delta.c_str());
+                            } else {
+                                console::log("%s", diff.content_delta.c_str());
+                                console::flush();
+                            }
                         }
                         if (!diff.reasoning_content_delta.empty()) {
                             if (g_tool_parser_debug) {
@@ -505,8 +511,10 @@ struct cli_context {
             }
         }
 
-        // Show TUI input box after generation completes
-        cli_tui::show_after_generation();
+        // Flush any remaining streaming output
+        if (cli_tui::is_enabled()) {
+            cli_tui::flush_stream();
+        }
 
         // Display final stats after generation
         display_status();
