@@ -322,34 +322,6 @@ std::string read_input() {
     return g_input_buffer;
 }
 
-void render() {
-    if (!g_enabled || !g_initialized) return;
-    
-    int term_height = get_term_height();
-    int term_width = get_term_width();
-    
-    // Render in order: output first, then UI elements on top
-    render_output(term_height, term_width);
-    
-    // Draw separator above input (row term_height-2)
-    draw_separator(term_height - 2, term_width);
-    
-    // Draw input box (row term_height-1)
-    g_input_row = term_height - 1;
-    move_cursor(g_input_row, 1);
-    clear_to_end();
-    printf("> %s", g_input_buffer.c_str());
-    move_cursor(g_input_row, 3 + g_cursor_pos);
-    
-    // Draw separator above stats (row term_height)
-    draw_separator(term_height, term_width);
-    
-    // Stats would go on row term_height+1 but we don't have that row
-    // So stats share the bottom area
-    
-    fflush(stdout);
-}
-
 bool is_enabled() { return g_enabled; }
 
 void set_enabled(bool enabled) {
@@ -365,7 +337,12 @@ void set_stats_line(const char* text) {
     int term_height = get_term_height();
     int term_width = get_term_width();
     draw_separator(term_height - 1, term_width);
-    draw_stats_line(term_height, term_width);
+    move_cursor(term_height, 1);
+    clear_to_end();
+    if (!g_stats_line.empty()) {
+        printf("%s", g_stats_line.c_str());
+    }
+    fflush(stdout);
 }
 
 void scroll_output(int /*lines*/) {
