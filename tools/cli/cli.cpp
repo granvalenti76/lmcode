@@ -11,6 +11,7 @@
 #include "cli-tool-exec.h"
 #include "cli-tool-parser.h"
 #include "cli-stats.h"
+#include "cli_tui.h"
 
 #include <array>
 #include <atomic>
@@ -837,6 +838,10 @@ int main(int argc, char ** argv) {
     console::init(params.simple_io, params.use_color);
     atexit([]() { console::cleanup(); });
 
+    // Initialize TUI for better input experience
+    cli_tui::init();
+    atexit([]() { cli_tui::cleanup(); });
+
     console::set_display(DISPLAY_TYPE_RESET);
     console::set_completion_callback([](std::string_view, size_t) {
         return std::vector<std::pair<std::string, size_t>>{};
@@ -915,6 +920,7 @@ int main(int argc, char ** argv) {
     console::log("  /stats          show detailed statistics\n");
     console::log("  /thinking       toggle thinking mode\n");
     console::log("  /debug          toggle debug mode (tool call logging)\n");
+    console::log("  /tui [on|off]   toggle TUI input mode (default: on)\n");
     console::log("  /tools          list available tools\n");
     console::log("  /tool <cmd>     tool management (add/remove/clear)\n");
     console::log("  /help           show this help\n");
@@ -932,13 +938,18 @@ int main(int argc, char ** argv) {
         std::string buffer;
         console::set_display(DISPLAY_TYPE_USER_INPUT);
         if (params.prompt.empty()) {
-            console::log("\n> ");
-            std::string line;
-            bool another_line = true;
-            do {
-                another_line = console::readline(line, params.multiline_input);
-                buffer += line;
-            } while (another_line);
+            // Use TUI input box if enabled, otherwise fallback to console::readline
+            if (cli_tui::is_enabled()) {
+                buffer = cli_tui::read_input();
+            } else {
+                console::log("\n> ");
+                std::string line;
+                bool another_line = true;
+                do {
+                    another_line = console::readline(line, params.multiline_input);
+                    buffer += line;
+                } while (another_line);
+            }
         } else {
             for (auto & fname : params.image) {
                 std::string marker = ctx_cli.load_input_file(fname, true);
@@ -1026,6 +1037,18 @@ int main(int argc, char ** argv) {
             ctx_cli.debug_mode = !ctx_cli.debug_mode;
             g_tool_parser_debug = ctx_cli.debug_mode;
             console::log("Debug mode %s.\n", ctx_cli.debug_mode ? "enabled" : "disabled");
+            continue;
+        } else if (string_starts_with(buffer, "/tui")) {
+            std::string cmd = string_strip(buffer.substr(4));
+            if (cmd == "on" || cmd.empty()) {
+                cli_tui::set_enabled(true);
+                console::log("TUI mode enabled.\n");
+            } else if (cmd == "off") {
+                cli_tui::set_enabled(false);
+                console::log("TUI mode disabled. Use Ctrl+C to exit.\n");
+            } else {
+                console::log("Usage: /tui [on|off]\n");
+            }
             continue;
         } else if (string_starts_with(buffer, "/tools")) {
             console::log("%s", ctx_cli.tool_registry.list_tools().c_str());
