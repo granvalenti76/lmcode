@@ -1059,7 +1059,11 @@ int main(int argc, char ** argv) {
                 ctx_cli.messages.erase(ctx_cli.messages.size() - 1);
                 add_user_msg = false;
             } else {
-                console::error("No message to regenerate.\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("No message to regenerate.\n");
+                } else {
+                    console::error("No message to regenerate.\n");
+                }
                 continue;
             }
         } else if (string_starts_with(buffer, "/clear")) {
@@ -1069,64 +1073,125 @@ int main(int argc, char ** argv) {
             ctx_cli.tool_calls_in_turn = 0;
             ctx_cli.conversation_turns = 0;
             ctx_cli.pending_incomplete_json.clear();
-            console::log("Chat cleared.\n");
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Chat cleared.\n");
+            } else {
+                console::log("Chat cleared.\n");
+            }
             continue;
         } else if (string_starts_with(buffer, "/stats")) {
-            console::log("%s", cli_stats_display::format_detailed(ctx_cli.stats).c_str());
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("%s", cli_stats_display::format_detailed(ctx_cli.stats).c_str());
+            } else {
+                console::log("%s", cli_stats_display::format_detailed(ctx_cli.stats).c_str());
+            }
             continue;
         } else if (string_starts_with(buffer, "/cache")) {
-            console::log("Tool cache is disabled.\n");
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Tool cache is disabled.\n");
+            } else {
+                console::log("Tool cache is disabled.\n");
+            }
             continue;
         } else if (string_starts_with(buffer, "/plan")) {
             ctx_cli.plan_mode = !ctx_cli.plan_mode;
-            console::log("Plan mode %s.\n", ctx_cli.plan_mode ? "enabled" : "disabled");
-            console::log("When enabled, tool calls will be shown for approval before execution.\n");
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Plan mode %s.\n", ctx_cli.plan_mode ? "enabled" : "disabled");
+                cli_tui::print("When enabled, tool calls will be shown for approval before execution.\n");
+            } else {
+                console::log("Plan mode %s.\n", ctx_cli.plan_mode ? "enabled" : "disabled");
+                console::log("When enabled, tool calls will be shown for approval before execution.\n");
+            }
             continue;
         } else if (string_starts_with(buffer, "/auto")) {
             std::string cmd = string_strip(buffer.substr(5));
             if (cmd == "on" || cmd == "true" || cmd == "1") {
                 ctx_cli.plan_mode = false;
-                console::log("Auto-execution enabled. Tools will run without confirmation.\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Auto-execution enabled. Tools will run without confirmation.\n");
+                } else {
+                    console::log("Auto-execution enabled. Tools will run without confirmation.\n");
+                }
             } else if (cmd == "off" || cmd == "false" || cmd == "0") {
                 ctx_cli.plan_mode = true;
-                console::log("Manual mode enabled. Tool calls will require confirmation.\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Manual mode enabled. Tool calls will require confirmation.\n");
+                } else {
+                    console::log("Manual mode enabled. Tool calls will require confirmation.\n");
+                }
             } else {
-                console::log("Usage: /auto <on|off>\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Usage: /auto <on|off>\n");
+                } else {
+                    console::log("Usage: /auto <on|off>\n");
+                }
             }
             continue;
         } else if (string_starts_with(buffer, "/thinking")) {
             ctx_cli.enable_thinking = !ctx_cli.enable_thinking;
-            console::log("Thinking %s.\n", ctx_cli.enable_thinking ? "enabled" : "disabled");
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Thinking %s.\n", ctx_cli.enable_thinking ? "enabled" : "disabled");
+            } else {
+                console::log("Thinking %s.\n", ctx_cli.enable_thinking ? "enabled" : "disabled");
+            }
             continue;
         } else if (string_starts_with(buffer, "/debug")) {
             ctx_cli.debug_mode = !ctx_cli.debug_mode;
             g_tool_parser_debug = ctx_cli.debug_mode;
-            console::log("Debug mode %s.\n", ctx_cli.debug_mode ? "enabled" : "disabled");
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Debug mode %s.\n", ctx_cli.debug_mode ? "enabled" : "disabled");
+            } else {
+                console::log("Debug mode %s.\n", ctx_cli.debug_mode ? "enabled" : "disabled");
+            }
             continue;
         } else if (string_starts_with(buffer, "/tui")) {
             std::string cmd = string_strip(buffer.substr(4));
             if (cmd == "on" || cmd.empty()) {
                 cli_tui::set_enabled(true);
-                console::log("TUI mode enabled.\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("TUI mode enabled.\n");
+                } else {
+                    console::log("TUI mode enabled.\n");
+                }
             } else if (cmd == "off") {
                 cli_tui::set_enabled(false);
-                console::log("TUI mode disabled. Use Ctrl+C to exit.\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("TUI mode disabled. Use Ctrl+C to exit.\n");
+                } else {
+                    console::log("TUI mode disabled. Use Ctrl+C to exit.\n");
+                }
             } else {
-                console::log("Usage: /tui [on|off]\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Usage: /tui [on|off]\n");
+                } else {
+                    console::log("Usage: /tui [on|off]\n");
+                }
             }
             continue;
         } else if (string_starts_with(buffer, "/tools")) {
-            console::log("%s", ctx_cli.tool_registry.list_tools().c_str());
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("%s", ctx_cli.tool_registry.list_tools().c_str());
+            } else {
+                console::log("%s", ctx_cli.tool_registry.list_tools().c_str());
+            }
             continue;
         } else if (string_starts_with(buffer, "/tool ")) {
             std::string cmd = string_strip(buffer.substr(6));
             if (cmd == "clear") {
                 ctx_cli.tool_registry.clear_tools();
-                console::log("All tools removed.\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("All tools removed.\n");
+                } else {
+                    console::log("All tools removed.\n");
+                }
             } else if (string_starts_with(cmd, "remove ")) {
                 std::string name = string_strip(cmd.substr(7));
                 ctx_cli.tool_registry.remove_tool(name);
-                console::log("Tool '%s' removed.\n", name.c_str());
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Tool '%s' removed.\n", name.c_str());
+                } else {
+                    console::log("Tool '%s' removed.\n", name.c_str());
+                }
             } else if (string_starts_with(cmd, "add ")) {
                 std::string name = string_strip(cmd.substr(4));
 
@@ -1146,30 +1211,54 @@ int main(int argc, char ** argv) {
                         break;
                     }
                 }
-                console::log(found ? "Tool '%s' added.\n" : "Tool '%s' not found.\n", name.c_str());
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print(found ? "Tool '%s' added.\n" : "Tool '%s' not found.\n", name.c_str());
+                } else {
+                    console::log(found ? "Tool '%s' added.\n" : "Tool '%s' not found.\n", name.c_str());
+                }
             } else {
-                console::log("Usage: /tool <add|remove|clear> [name]\n");
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Usage: /tool <add|remove|clear> [name]\n");
+                } else {
+                    console::log("Usage: /tool <add|remove|clear> [name]\n");
+                }
             }
             continue;
         } else if (string_starts_with(buffer, "/help")) {
-            console::log("See commands above.\n");
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("See commands above.\n");
+            } else {
+                console::log("See commands above.\n");
+            }
             continue;
         } else if ((string_starts_with(buffer, "/image ") && inf.has_inp_image) ||
                    (string_starts_with(buffer, "/audio ") && inf.has_inp_audio)) {
             std::string fname = string_strip(buffer.substr(7));
             std::string marker = ctx_cli.load_input_file(fname, true);
             if (marker.empty()) {
-                console::error("file does not exist: '%s'\n", fname.c_str());
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("file does not exist: '%s'\n", fname.c_str());
+                } else {
+                    console::error("file does not exist: '%s'\n", fname.c_str());
+                }
                 continue;
             }
             cur_msg += marker;
-            console::log("Loaded: '%s'\n", fname.c_str());
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Loaded: '%s'\n", fname.c_str());
+            } else {
+                console::log("Loaded: '%s'\n", fname.c_str());
+            }
             continue;
         } else if (string_starts_with(buffer, "/read ")) {
             std::string fname = string_strip(buffer.substr(6));
             std::string marker = ctx_cli.load_input_file(fname, false);
             if (marker.empty()) {
-                console::error("file does not exist: '%s'\n", fname.c_str());
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("file does not exist: '%s'\n", fname.c_str());
+                } else {
+                    console::error("file does not exist: '%s'\n", fname.c_str());
+                }
                 continue;
             }
             if (inf.fim_sep_token != LLAMA_TOKEN_NULL) {
@@ -1180,7 +1269,11 @@ int main(int argc, char ** argv) {
                 cur_msg += "--- File: " + fname + " ---\n";
             }
             cur_msg += marker;
-            console::log("Loaded: '%s'\n", fname.c_str());
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("Loaded: '%s'\n", fname.c_str());
+            } else {
+                console::log("Loaded: '%s'\n", fname.c_str());
+            }
             continue;
         } else {
             cur_msg += buffer;
