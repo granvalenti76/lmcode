@@ -17,7 +17,6 @@
 #include <array>
 #include <atomic>
 #include <algorithm>
-#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -543,7 +542,8 @@ struct cli_context {
             std::string line;
             bool confirmed = false;
 
-            console::cleanup();
+            // Suspend TUI to allow normal terminal input (with echo)
+            cli_tui::suspend();
             try {
                 if (std::getline(std::cin, line)) {
                     size_t start = line.find_first_not_of(" \t\n\r");
@@ -555,7 +555,7 @@ struct cli_context {
             } catch (...) {
                 console::error("\n\033[31mError reading confirmation input.\033[0m\n");
             }
-            console::init(false, true);
+            cli_tui::resume();
 
             console::set_display(DISPLAY_TYPE_RESET);
 
@@ -606,7 +606,8 @@ struct cli_context {
             std::string line;
             bool confirmed = false;
 
-            console::cleanup();
+            // Suspend TUI to allow normal terminal input (with echo)
+            cli_tui::suspend();
             try {
                 if (std::getline(std::cin, line)) {
                     size_t start = line.find_first_not_of(" \t\n\r");
@@ -618,7 +619,7 @@ struct cli_context {
             } catch (...) {
                 console::error("\n\033[31mError reading confirmation input.\033[0m\n");
             }
-            console::init(false, true);
+            cli_tui::resume();
 
             console::set_display(DISPLAY_TYPE_RESET);
 

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <atomic>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <termios.h>
@@ -19,7 +20,6 @@ namespace cli_tui {
 static const char* HIDE_CURSOR    = "\033[?25l";
 static const char* SHOW_CURSOR    = "\033[?25h";
 static const char* BLINK_BLOCK_CURSOR = "\033[1 q";
-static const char* CLEAR_SCREEN   = "\033[2J";
 static const char* MOVE_HOME      = "\033[H";
 static const char* COLOR_GRAY     = "\033[90m";
 static const char* COLOR_RESET    = "\033[0m";
@@ -117,6 +117,10 @@ static bool     g_enabled     = true;
 static bool     g_initialized = false;
 static termios  g_initial_state;
 static bool     g_term_valid  = false;
+static bool     g_suspended   = false;  // Track if terminal is in suspended state
+
+// Resize flag (async-signal-safe: only set flag in handler, check in main loop)
+static std::atomic<bool> g_resize_needed{false};
 
 // Bulk print state
 static bool g_suppress_render = false;
@@ -171,7 +175,8 @@ static void draw_separator() {
 }
 
 static void handle_resize(int /*signum*/) {
-    if (g_enabled && g_initialized) render();
+    // FIX: Only set flag in signal handler (printf/render are not async-signal-safe)
+    g_resize_needed.store(true);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -233,6 +238,43 @@ void cleanup() {
 
     g_enabled     = false;
     g_initialized = false;
+    g_suspended   = false;
+}
+
+void suspend() {
+    if (!g_initialized || !g_term_valid || g_suspended) return;
+
+    // Restore terminal to normal cooked mode with echo
+    tcsetattr(STDIN_FILENO, TCSANOW, &g_initial_state);
+    printf("%s%s", SHOW_CURSOR, COLOR_RESET);
+    fflush(stdout);
+    g_suspended = true;
+}
+
+void resume() {
+    if (!g_initialized || !g_term_valid || !g_suspended) return;
+
+    // Restore raw mode
+    struct termios raw = g_initial_state;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN]  = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+    printf("%s%s", HIDE_CURSOR, BLINK_BLOCK_CURSOR);
+    fflush(stdout);
+    g_suspended = false;
+    render();  // Redraw to restore UI
+}
+
+void process_resize() {
+    // FIX: Check resize flag and render in main thread (safe)
+    if (g_resize_needed.load()) {
+        g_resize_needed.store(false);
+        if (g_enabled && g_initialized && !g_suspended) {
+            render();
+        }
+    }
 }
 
 // FIX: use a dynamic buffer to avoid the 4096-byte truncation
@@ -377,7 +419,10 @@ std::string read_input() {
             continue;
         }
         if (c == '\n' || c == '\r') break;
-        if (c == 3)  { g_input_buffer.clear(); break; }        // Ctrl-C
+        if (c == 3) {  // Ctrl-C: clear input, signal handler already set g_is_interrupted
+            g_input_buffer.clear();
+            break;
+        }
         if (c == 12) { g_output_buffer.clear(); render(); continue; } // Ctrl-L clear
         if (c >= 32 && c < 127) {
             g_input_buffer.insert(g_cursor_pos, 1, c);
@@ -409,9 +454,9 @@ void render() {
     if (max_output < 1) max_output = 1;
 
     // ── Clear & redraw ─────────────────────────────────────────
-    // FIX: always emit COLOR_RESET before clearing so stale ANSI from the
-    // previous frame doesn't bleed into the new frame.
-    printf("%s%s%s", COLOR_RESET, CLEAR_SCREEN, MOVE_HOME);
+    // FIX: Don't clear entire screen (causes flickering).
+    // Each line is cleared individually with clear_to_end() below.
+    printf("%s%s", COLOR_RESET, MOVE_HOME);
 
     // Expand logical lines → wrapped screen-lines respecting term_width
     std::vector<std::string> screen_lines;

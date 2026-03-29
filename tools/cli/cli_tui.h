@@ -51,8 +51,20 @@ bool is_enabled();
 // Enable/disable TUI
 void set_enabled(bool enabled);
 
+// Suspend TUI (restore terminal to normal mode for std::getline, etc.)
+// Call before synchronous input operations
+void suspend();
+
+// Resume TUI (restore raw mode after synchronous input)
+// Call after synchronous input operations complete
+void resume();
+
 // Force a full screen redraw (e.g., after terminal resize)
 void force_redraw();
+
+// Check and process resize flag (call periodically in main loop)
+// This is the safe way to handle SIGWINCH without deadlock
+void process_resize();
 
 // Set the stats line text (displayed below input box)
 void set_stats_line(const char* text);
