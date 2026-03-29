@@ -1,0 +1,38 @@
+# GBNF Grammar for llama.cpp CLI Tool Calling
+# This grammar forces the model to output valid JSON for tool calls
+
+root ::= tool_call | response_text
+
+# Tool call: must be valid JSON with name and arguments
+tool_call ::= "{" ws "\"name\"" ws ":" ws tool_name ws "," ws "\"arguments\"" ws ":" ws arguments ws "}"
+
+# Tool names (whitelist of available tools)
+# Must match the tools registered in cli-tool.cpp get_default_tools() and get_swift_tools()
+tool_name ::= "\"read_file\"" | "\"write_file\"" | "\"list_dir\"" | "\"touch_file\"" | "\"shell\"" | "\"swift_build\"" | "\"swift_test\"" | "\"swift_run\"" | "\"swift_package\"" | "\"swift_format\"" | "\"insert_line\"" | "\"replace_range\"" | "\"delete_lines\"" | "\"start_file\"" | "\"append_file\"" | "\"finish_file\"" | "\"search_replace\"" | "\"get_line_numbers\"" | "\"search_regex\""
+
+# Arguments: JSON object with tool-specific fields
+arguments ::= object
+
+# JSON grammar (simplified but complete)
+object ::= "{" ws "}" | "{" ws members ws "}"
+members ::= member | member ws "," ws members
+member ::= string ws ":" ws value
+
+array ::= "[" ws "]" | "[" ws elements ws "]"
+elements ::= value | value ws "," ws elements
+
+value ::= string | number | object | array | "true" | "false" | "null"
+
+string ::= "\"" chars "\""
+chars ::= char | char chars
+char ::= [^"\\\x00-\x1F] | escape
+escape ::= "\\" ["/\\bfnrt] | "u" hex hex hex hex
+hex ::= [0-9A-Fa-f]
+
+number ::= "-"? [0-9]+ ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+
+# Whitespace (allow newlines in JSON for readability)
+ws ::= ([ \t\n\r] ws)?
+
+# Response text: anything that's not a tool call (plain text response)
+response_text ::= [^{}]+
