@@ -85,6 +85,10 @@ private:
     cli_tool_result execute_insert_line(const cli_tool_call& call);
     cli_tool_result execute_replace_range(const cli_tool_call& call);
     cli_tool_result execute_delete_lines(const cli_tool_call& call);
+    // File search tools (from upstream llama.cpp)
+    cli_tool_result execute_file_glob_search(const cli_tool_call& call);
+    cli_tool_result execute_grep_search(const cli_tool_call& call);
+    // Swift tools
     cli_tool_result execute_swift_build(const cli_tool_call& call);
     cli_tool_result execute_swift_test(const cli_tool_call& call);
     cli_tool_result execute_swift_run(const cli_tool_call& call);
@@ -150,6 +154,32 @@ namespace cli_tool_exec {
 
     // Delete a range of lines from a file
     cli_tool_result delete_lines(const std::string& path, int start_line, int end_line);
+
+    // --- File search tools (from upstream llama.cpp) ---
+
+    // Search for files matching a glob pattern
+    // base: base directory to search in
+    // include: glob pattern (e.g. "**/*.cpp"), default "**"
+    // exclude: glob pattern to exclude, default ""
+    // max_results: maximum number of results (default 100)
+    cli_tool_result file_glob_search(const std::string& base,
+                                      const std::string& include,
+                                      const std::string& exclude,
+                                      size_t max_results = 100);
+
+    // Search for a regex pattern in files
+    // path: file or directory to search in
+    // pattern: regex pattern
+    // include: glob pattern to filter files (default "**")
+    // exclude: glob pattern to exclude files
+    // return_line_numbers: if true, include line numbers
+    // max_results: maximum number of matches (default 100)
+    cli_tool_result grep_search(const std::string& path,
+                                 const std::string& pattern,
+                                 const std::string& include,
+                                 const std::string& exclude,
+                                 bool return_line_numbers,
+                                 size_t max_results = 100);
 
     // --- Snippet helpers ---
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cli-tool.h"
+#include "cli-tool.h"  // Includes chat.h upstream
 
 #include <string>
 #include <vector>
@@ -22,15 +22,13 @@ inline std::string generate_tool_call_id() {
 
 // Extract tool calls from model response
 // Returns empty vector if no tool calls found
+// Uses upstream common_chat_parse() for robust parsing
 std::vector<cli_tool_call> parse_tool_calls(
     const std::string& content,
     const std::string& reasoning_content = "");
 
 // Check if content contains tool calls
 bool has_tool_calls(const std::string& content);
-
-// Extract tool call from JSON format
-cli_tool_call parse_json_tool_call(const std::string& json_str);
 
 // Generate tool result message for model
 std::string format_tool_result(const cli_tool_result& result);

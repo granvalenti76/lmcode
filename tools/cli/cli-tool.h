@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include "chat.h"  // Upstream: common_chat_tool_call, common_chat_tool, common_chat_msg
 #include "nlohmann/json.hpp"
 
 #include <string>
@@ -9,7 +10,7 @@
 
 using json = nlohmann::ordered_json;
 
-// Tool definition
+// Tool definition (for registry - keeps auto_execute flag for confirmation logic)
 struct cli_tool {
     std::string name;
     std::string description;
@@ -21,12 +22,9 @@ struct cli_tool {
     }
 };
 
-// Tool call from model output
-struct cli_tool_call {
-    std::string name;
-    std::string arguments;   // JSON string
-    std::string id;
-};
+// Tool call from model output - USE UPSTREAM STRUCT
+// common_chat_tool_call has: name, arguments, id (same fields as cli_tool_call)
+using cli_tool_call = common_chat_tool_call;
 
 // Tool execution result
 struct cli_tool_result {

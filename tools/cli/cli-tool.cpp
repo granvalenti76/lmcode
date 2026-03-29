@@ -79,6 +79,10 @@ static const char* SEARCH_REPLACE_SCHEMA = R"json({"type":"object","properties":
 static const char* GET_LINE_NUMBERS_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"}},"required":["path"]})json";
 static const char* SEARCH_REGEX_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"pattern":{"type":"string","description":"Regex pattern to search for"},"replace":{"type":"string","description":"Text to replace matches with"}},"required":["path","pattern","replace"]})json";
 
+// --- File search tools (from upstream llama.cpp) ---
+static const char* FILE_GLOB_SEARCH_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Base directory to search in"},"include":{"type":"string","description":"Glob pattern for files to include (e.g. \"**/*.cpp\"). Default: **"},"exclude":{"type":"string","description":"Glob pattern for files to exclude"}},"required":["path"]})json";
+static const char* GREP_SEARCH_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"File or directory to search in"},"pattern":{"type":"string","description":"Regular expression pattern to search for"},"include":{"type":"string","description":"Glob pattern to filter files (default: **)"},\"exclude\":{\"type\":\"string\",\"description\":\"Glob pattern to exclude files\"},\"return_line_numbers\":{\"type\":\"boolean\",\"description\":\"If true, include line numbers in results\"}},\"required\":[\"path\",\"pattern\"]})json";
+
 static const char* INSERT_LINE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"line_number":{"type":"integer","description":"0-indexed line number where to insert (0 = beginning, n = end)"},"content":{"type":"string","description":"Line content to insert"}},"required":["path","line_number","content"]})json";
 static const char* REPLACE_RANGE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"0-indexed start line (inclusive)"},"end_line":{"type":"integer","description":"0-indexed end line (exclusive)"},"content":{"type":"string","description":"New content to replace the range"}},"required":["path","start_line","end_line","content"]})json";
 static const char* DELETE_LINES_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"0-indexed start line (inclusive)"},"end_line":{"type":"integer","description":"0-indexed end line (exclusive)"}},"required":["path","start_line","end_line"]})json";
@@ -132,6 +136,9 @@ std::vector<cli_tool> get_default_tools() {
         {"insert_line", "Insert a line at a specific position in a file", INSERT_LINE_SCHEMA, false},
         {"replace_range", "Replace a range of lines with new content", REPLACE_RANGE_SCHEMA, false},
         {"delete_lines", "Delete a range of lines from a file", DELETE_LINES_SCHEMA, false},
+        // --- File search tools (from upstream llama.cpp) ---
+        {"file_glob_search", "Recursively search for files matching a glob pattern (e.g. **/*.cpp)", FILE_GLOB_SEARCH_SCHEMA, true},
+        {"grep_search", "Search for a regex pattern in files under a path", GREP_SEARCH_SCHEMA, true},
         // --- Snippet library (./snippets/) ---
         // Workflow: search_snippets → load_snippet → search_replace / append_file to customise
         {"search_snippets", "List all snippets in ./snippets/ directory (simple ls)", SEARCH_SNIPPETS_SCHEMA, true},

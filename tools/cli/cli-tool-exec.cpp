@@ -1186,8 +1186,12 @@ std::string cli_tool_executor_impl::get_safety_violation(const std::string& cmd)
 }
 
 bool cli_tool_executor_impl::requires_confirmation(const cli_tool_call& call) const {
+    // Read-only tools: no confirmation needed
     if (call.name == "read_file" || call.name == "list_dir" ||
-        call.name == "touch_file" || call.name == "search_snippets") {
+        call.name == "touch_file" || call.name == "search_snippets" ||
+        call.name == "file_glob_search" || call.name == "grep_search" ||
+        call.name == "get_file_info" || call.name == "get_line_numbers" ||
+        call.name == "verify_file") {
         return false;
     }
 
@@ -1261,11 +1265,16 @@ cli_tool_result cli_tool_executor_impl::execute(const cli_tool_call& call, bool 
         else if (call.name == "insert_line")    result = execute_insert_line(call);
         else if (call.name == "replace_range")  result = execute_replace_range(call);
         else if (call.name == "delete_lines")   result = execute_delete_lines(call);
+        // File search tools (from upstream llama.cpp)
+        else if (call.name == "file_glob_search") result = execute_file_glob_search(call);
+        else if (call.name == "grep_search")      result = execute_grep_search(call);
+        // Swift tools
         else if (call.name == "swift_build")    result = execute_swift_build(call);
         else if (call.name == "swift_test")     result = execute_swift_test(call);
         else if (call.name == "swift_run")      result = execute_swift_run(call);
         else if (call.name == "swift_package")  result = execute_swift_package(call);
         else if (call.name == "swift_format")   result = execute_swift_format(call);
+        // Snippet tools
         else if (call.name == "search_snippets") result = execute_search_snippets(call);
         else if (call.name == "load_snippet")    result = execute_load_snippet(call);
         else {
@@ -1756,10 +1765,232 @@ cli_tool_result cli_tool_executor_impl::execute_search_regex(const cli_tool_call
 }
 
 // ============================================================================
+// File search tools (from upstream llama.cpp)
+// ============================================================================
+
+cli_tool_result cli_tool_executor_impl::execute_file_glob_search(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string path = get_arg(args, "path");
+    std::string include = args.value("include", std::string("**"));
+    std::string exclude = args.value("exclude", std::string(""));
+
+    if (path.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: path"; r.exit_code = -1;
+        return r;
+    }
+
+    // Security check: path must be within CWD
+    if (!cli_tool_exec::is_in_cwd(path)) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Security: Cannot search outside current directory"; r.exit_code = -1;
+        return r;
+    }
+
+    auto result = cli_tool_exec::file_glob_search(path, include, exclude);
+    result.tool_call_id = call.id;
+    return result;
+}
+
+cli_tool_result cli_tool_executor_impl::execute_grep_search(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string path = get_arg(args, "path");
+    std::string pattern = get_arg(args, "pattern");
+    std::string include = args.value("include", std::string("**"));
+    std::string exclude = args.value("exclude", std::string(""));
+    bool return_line_numbers = args.value("return_line_numbers", false);
+
+    if (path.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: path"; r.exit_code = -1;
+        return r;
+    }
+    if (pattern.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: pattern"; r.exit_code = -1;
+        return r;
+    }
+
+    // Security check: path must be within CWD
+    if (!cli_tool_exec::is_in_cwd(path)) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Security: Cannot search outside current directory"; r.exit_code = -1;
+        return r;
+    }
+
+    auto result = cli_tool_exec::grep_search(path, pattern, include, exclude, return_line_numbers);
+    result.tool_call_id = call.id;
+    return result;
+}
+
+// ============================================================================
 // Snippet library helpers
 // ============================================================================
 
 namespace cli_tool_exec {
+
+// ============================================================================
+// File search tools (from upstream llama.cpp)
+// ============================================================================
+
+cli_tool_result file_glob_search(const std::string& base,
+                                  const std::string& include,
+                                  const std::string& exclude,
+                                  size_t max_results) {
+    cli_tool_result result;
+    result.exit_code = 0;
+    result.success = true;
+
+    std::ostringstream output_text;
+    size_t count = 0;
+
+    std::error_code ec;
+    fs::path base_path(base);
+
+    // Validate base path exists
+    if (!fs::exists(base_path, ec)) {
+        result.error = "Path does not exist: " + base;
+        result.exit_code = 1;
+        result.success = false;
+        return result;
+    }
+
+    for (const auto& entry : fs::recursive_directory_iterator(base_path,
+            fs::directory_options::skip_permission_denied, ec)) {
+        if (!entry.is_regular_file()) continue;
+
+        std::string rel = fs::relative(entry.path(), base_path, ec).string();
+        if (ec) continue;
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+
+        // Simple glob matching (supports * and **)
+        auto matches_glob = [](const std::string& pattern, const std::string& path) -> bool {
+            if (pattern == "**" || pattern.empty()) return true;
+
+            // Handle ** pattern
+            if (pattern.find("**") != std::string::npos) {
+                std::string ext = pattern;
+                size_t pos = ext.find("**");
+                ext.erase(pos, 2);
+                if (!ext.empty() && ext[0] == '/') ext.erase(0, 1);
+                if (!ext.empty()) {
+                    return path.size() >= ext.size() &&
+                           path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+                }
+                return true;
+            }
+
+            // Simple * matching
+            if (pattern.find('*') != std::string::npos) {
+                std::regex re("^" + pattern + "$");
+                std::smatch match;
+                return std::regex_match(path, match, re);
+            }
+
+            return path == pattern;
+        };
+
+        if (!matches_glob(include, rel)) continue;
+        if (!exclude.empty() && matches_glob(exclude, rel)) continue;
+
+        output_text << entry.path().string() << "\n";
+        if (++count >= max_results) {
+            break;
+        }
+    }
+
+    output_text << "\n---\nTotal matches: " << count << "\n";
+    result.content = output_text.str();
+    return result;
+}
+
+cli_tool_result grep_search(const std::string& path,
+                             const std::string& pattern,
+                             const std::string& include,
+                             const std::string& exclude,
+                             bool return_line_numbers,
+                             size_t max_results) {
+    cli_tool_result result;
+    result.exit_code = 0;
+    result.success = true;
+
+    std::regex regex_pattern;
+    try {
+        regex_pattern = std::regex(pattern);
+    } catch (const std::regex_error& e) {
+        result.error = "Invalid regex pattern: " + std::string(e.what());
+        result.exit_code = 1;
+        result.success = false;
+        return result;
+    }
+
+    std::ostringstream output_text;
+    size_t total = 0;
+
+    auto search_file = [&](const fs::path& fpath) {
+        std::ifstream f(fpath);
+        if (!f) return;
+        std::string line;
+        int lineno = 0;
+        while (std::getline(f, line) && total < max_results) {
+            lineno++;
+            if (std::regex_search(line, regex_pattern)) {
+                output_text << fpath.string() << ":";
+                if (return_line_numbers) {
+                    output_text << lineno << ":";
+                }
+                output_text << line << "\n";
+                total++;
+            }
+        }
+    };
+
+    std::error_code ec;
+    fs::path search_path(path);
+
+    if (fs::is_regular_file(search_path, ec)) {
+        search_file(search_path);
+    } else if (fs::is_directory(search_path, ec)) {
+        for (const auto& entry : fs::recursive_directory_iterator(search_path,
+                fs::directory_options::skip_permission_denied, ec)) {
+            if (!entry.is_regular_file()) continue;
+            if (total >= max_results) break;
+
+            std::string rel = fs::relative(entry.path(), search_path, ec).string();
+            if (ec) continue;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+
+            // Simple glob matching for include/exclude
+            auto matches_glob = [](const std::string& pattern, const std::string& path) -> bool {
+                if (pattern == "**" || pattern.empty()) return true;
+                if (pattern.find('*') != std::string::npos) {
+                    std::regex re("^" + pattern + "$");
+                    std::smatch match;
+                    return std::regex_match(path, match, re);
+                }
+                return path == pattern;
+            };
+
+            if (!matches_glob(include, rel)) continue;
+            if (!exclude.empty() && matches_glob(exclude, rel)) continue;
+
+            search_file(entry.path());
+        }
+    } else {
+        result.error = "Path does not exist: " + path;
+        result.exit_code = 1;
+        result.success = false;
+        return result;
+    }
+
+    output_text << "\n\n---\nTotal matches: " << total << "\n";
+    result.content = output_text.str();
+    return result;
+}
+
+// ============================================================================
+// Snippet library helpers
+// ============================================================================
 
 // Extract the description from a snippet file.
 // Convention: the very first line of the file may contain a description tag:

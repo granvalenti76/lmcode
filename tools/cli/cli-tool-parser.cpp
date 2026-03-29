@@ -1,5 +1,6 @@
 #include "cli-tool-parser.h"
 #include "console.h"
+#include "chat.h"  // Upstream: common_chat_parse, common_chat_parser_params
 
 #include <algorithm>
 #include <cctype>
@@ -11,196 +12,7 @@ namespace cli_tool_parser {
 std::atomic<int> g_tool_call_counter{0};
 }
 
-// Helper: sanitize string for JSON (escape special chars + replace invalid UTF-8)
-static std::string sanitize_for_json(const std::string& input) {
-    std::string result;
-    result.reserve(input.size() * 2);  // May expand due to escaping
-
-    size_t i = 0;
-    while (i < input.size()) {
-        unsigned char c = input[i];
-
-        // Escape special JSON characters
-        switch (c) {
-            case '"':  result += "\\\""; i++; continue;
-            case '\\': result += "\\\\"; i++; continue;
-            case '\b': result += "\\b"; i++; continue;
-            case '\f': result += "\\f"; i++; continue;
-            case '\n': result += "\\n"; i++; continue;
-            case '\r': result += "\\r"; i++; continue;
-            case '\t': result += "\\t"; i++; continue;
-        }
-
-        // ASCII - pass through
-        if (c < 0x80) { result += c; i++; continue; }
-
-        // Multi-byte UTF-8 validation
-        int expected_bytes = 0;
-        if ((c & 0xE0) == 0xC0) expected_bytes = 2;
-        else if ((c & 0xF0) == 0xE0) expected_bytes = 3;
-        else if ((c & 0xF8) == 0xF0) expected_bytes = 4;
-        else { result += "\xEF\xBF\xBD"; i++; continue; }
-
-        if (i + expected_bytes > input.size()) {
-            result += "\xEF\xBF\xBD";
-            break;
-        }
-
-        bool valid = true;
-        for (int j = 1; j < expected_bytes; j++) {
-            if ((input[i + j] & 0xC0) != 0x80) { valid = false; break; }
-        }
-
-        if (valid) {
-            for (int j = 0; j < expected_bytes; j++) result += input[i + j];
-            i += expected_bytes;
-        } else {
-            result += "\xEF\xBF\xBD";
-            i++;
-        }
-    }
-    return result;
-}
-
-// Helper: sanitize raw newlines/quotes inside JSON string values (state-machine parser)
-// This fixes the common LLM mistake of writing unescaped newlines in JSON strings
-static std::string sanitize_json_string_values(const std::string& json_str) {
-    std::string result;
-    result.reserve(json_str.size() * 2);
-    
-    bool in_string = false;
-    bool escape_next = false;
-    
-    for (size_t i = 0; i < json_str.size(); i++) {
-        char c = json_str[i];
-        
-        if (escape_next) {
-            result += c;
-            escape_next = false;
-            continue;
-        }
-        
-        if (c == '\\' && in_string) {
-            result += c;
-            escape_next = true;
-            continue;
-        }
-        
-        if (c == '"') {
-            in_string = !in_string;
-            result += c;
-            continue;
-        }
-        
-        // Inside a string value, escape raw newlines, carriage returns, and tabs
-        if (in_string) {
-            if (c == '\n') {
-                result += "\\n";
-                continue;
-            }
-            if (c == '\r') {
-                result += "\\r";
-                continue;
-            }
-            if (c == '\t') {
-                result += "\\t";
-                continue;
-            }
-            // Note: unescaped '"' inside a string is handled above at the
-            // `if (c == '"') { in_string = !in_string; ... }` branch — it flips
-            // the string state but is already emitted there.  Do NOT add a
-            // duplicate handler here; it is unreachable and was a latent bug.
-        }
-        
-        result += c;
-    }
-    
-    return result;
-}
-
-// Helper: clean invisible/special UTF-8 characters that LLMs sometimes generate
-// Common issues: non-breaking space (\xC2\xA0), zero-width spaces, etc.
-static std::string clean_json_string(const std::string& str) {
-    std::string result = str;
-    
-    // Replace non-breaking space (UTF-8: \xC2\xA0) with regular space
-    size_t pos;
-    while ((pos = result.find("\xC2\xA0")) != std::string::npos) {
-        result.replace(pos, 2, " ");
-    }
-    
-    // Replace zero-width space (UTF-8: \xE2\x80\x8B) with nothing
-    while ((pos = result.find("\xE2\x80\x8B")) != std::string::npos) {
-        result.erase(pos, 3);
-    }
-    
-    // Replace zero-width non-joiner (UTF-8: \xE2\x80\x8C) with nothing
-    while ((pos = result.find("\xE2\x80\x8C")) != std::string::npos) {
-        result.erase(pos, 3);
-    }
-    
-    // Replace byte order mark (UTF-8: \xEF\xBB\xBF) with nothing
-    while ((pos = result.find("\xEF\xBB\xBF")) != std::string::npos) {
-        result.erase(pos, 3);
-    }
-    
-    return result;
-}
-
 namespace cli_tool_parser {
-
-static std::string trim(const std::string& str) {
-    size_t start = str.find_first_not_of(" \t\n\r");
-    if (start == std::string::npos) return "";
-    size_t end = str.find_last_not_of(" \t\n\r");
-    return str.substr(start, end - start + 1);
-}
-
-// Generic balanced-delimiter extractor: works for both {..} objects and [..] arrays
-static std::string extract_json_value(const std::string& str, size_t start_pos,
-                                      char open_ch, char close_ch) {
-    if (start_pos >= str.size() || str[start_pos] != open_ch) return "";
-
-    int depth = 0;
-    bool in_string = false;
-    bool escape_next = false;
-
-    for (size_t i = start_pos; i < str.size(); ++i) {
-        char c = str[i];
-        if (escape_next)              { escape_next = false; continue; }
-        if (c == '\\' && in_string)  { escape_next = true;  continue; }
-        if (c == '"')                 { in_string = !in_string; continue; }
-        if (!in_string) {
-            if      (c == open_ch)  { depth++; }
-            else if (c == close_ch) { depth--; if (depth == 0) return str.substr(start_pos, i - start_pos + 1); }
-        }
-    }
-    return "";  // Unbalanced
-}
-
-static std::string extract_json_object(const std::string& str, size_t pos) {
-    return extract_json_value(str, pos, '{', '}');
-}
-
-// Helper: safely extract arguments from JSON, handling both string and object types
-static std::string safe_extract_arguments(const json& obj) {
-    if (!obj.contains("arguments")) {
-        return "{}";
-    }
-    const auto& args = obj["arguments"];
-    if (args.is_string()) {
-        // LLM sometimes JSON-encodes the arguments string (common mistake)
-        return args.get<std::string>();
-    } else if (args.is_object()) {
-        return args.dump();
-    } else {
-        return "{}";
-    }
-}
-
-static std::string extract_json_array(const std::string& str, size_t pos) {
-    return extract_json_value(str, pos, '[', ']');
-}
 
 std::vector<cli_tool_call> parse_tool_calls(
     const std::string& content,
@@ -208,80 +20,90 @@ std::vector<cli_tool_call> parse_tool_calls(
 {
     std::vector<cli_tool_call> result;
 
-    // Note: reasoning_content is not used - we parse only from content
+    // Use upstream PEG parser for robust tool call extraction
+    // This handles: partial JSON, malformed strings, markdown blocks, etc.
+    common_chat_parser_params parser_params;
+    parser_params.format = COMMON_CHAT_FORMAT_CONTENT_ONLY;  // We use custom JSON format
+    parser_params.parse_tool_calls = true;
+    parser_params.debug = g_tool_parser_debug.load();
 
-    // -------------------------------------------------------------------------
-    // Pattern 1: JSON array  [{"name":..., "arguments":...}, ...]
-    // -------------------------------------------------------------------------
-    {
-        // Use regex to find arrays with tool calls - tolerant to whitespace/newlines
+    // Parse using upstream common_chat_parse
+    common_chat_msg msg = common_chat_parse(content, false, parser_params);
+
+    // Extract tool calls from parsed message
+    if (!msg.tool_calls.empty()) {
+        for (const auto& tool_call : msg.tool_calls) {
+            cli_tool_call call;
+            call.name = tool_call.name;
+            call.arguments = tool_call.arguments;
+            call.id = tool_call.id;
+
+            // Generate ID if missing
+            if (call.id.empty()) {
+                call.id = generate_tool_call_id();
+            }
+
+            result.push_back(call);
+        }
+    }
+
+    // Fallback: if upstream parser found nothing, try legacy JSON regex parsing
+    // This handles edge cases where model outputs raw JSON without proper formatting
+    if (result.empty()) {
+        // Legacy Pattern 1: JSON array [{"name":..., "arguments":...}, ...]
         std::regex array_start_regex(R"(\[\s*\{\s*"name"\s*:)");
         std::smatch match;
         std::string::const_iterator search_start(content.cbegin());
 
         while (std::regex_search(search_start, content.cend(), match, array_start_regex)) {
             size_t pos = std::distance(content.cbegin(), search_start) + match.position();
-            std::string arr_str = extract_json_array(content, pos);
-            
+
+            // Extract array
+            int depth = 0;
+            bool in_string = false;
+            bool escape_next = false;
+            std::string arr_str;
+
+            for (size_t i = pos; i < content.size(); ++i) {
+                char c = content[i];
+                if (escape_next) { escape_next = false; arr_str += c; continue; }
+                if (c == '\\' && in_string) { escape_next = true; arr_str += c; continue; }
+                if (c == '"') { in_string = !in_string; arr_str += c; continue; }
+                if (!in_string) {
+                    if (c == '[') depth++;
+                    else if (c == ']') {
+                        depth--;
+                        arr_str += c;
+                        if (depth == 0) break;
+                        continue;
+                    }
+                }
+                arr_str += c;
+            }
+
             if (!arr_str.empty()) {
                 try {
-                    // Clean invisible characters before parsing
-                    std::string cleaned = clean_json_string(arr_str);
-                    auto arr = json::parse(cleaned);
+                    auto arr = json::parse(arr_str);
                     if (arr.is_array() && !arr.empty()) {
-                        bool any_tool = false;
                         for (const auto& item : arr) {
                             if (item.contains("name") && item.contains("arguments")) {
-                                any_tool = true;
                                 cli_tool_call call;
-                                call.name      = item.value("name", "");
-                                call.arguments = safe_extract_arguments(item);
-                                call.id        = item.value("id", item.value("tool_call_id", ""));
+                                call.name = item.value("name", "");
+                                call.arguments = item["arguments"].is_string()
+                                    ? item["arguments"].get<std::string>()
+                                    : item["arguments"].dump();
+                                call.id = item.value("id", item.value("tool_call_id", ""));
                                 if (call.id.empty()) {
                                     call.id = generate_tool_call_id();
                                 }
                                 result.push_back(call);
                             }
                         }
-                        if (any_tool) break;  // Found a tool array, stop
-                        result.clear();  // Array had no tools, keep searching
+                        if (!result.empty()) break;
                     }
-                } catch (const std::exception& e) {
-                    // Try to sanitize and re-parse (handles raw newlines in strings)
-                    try {
-                        std::string sanitized = sanitize_json_string_values(arr_str);
-                        auto arr = json::parse(sanitized);
-                        if (arr.is_array() && !arr.empty()) {
-                            bool any_tool = false;
-                            for (const auto& item : arr) {
-                                if (item.contains("name") && item.contains("arguments")) {
-                                    any_tool = true;
-                                    cli_tool_call call;
-                                    call.name      = item.value("name", "");
-                                    call.arguments = safe_extract_arguments(item);
-                                    call.id        = item.value("id", item.value("tool_call_id", ""));
-                                    if (call.id.empty()) {
-                                        call.id = generate_tool_call_id();
-                                    }
-                                    result.push_back(call);
-                                }
-                            }
-                            if (any_tool) break;
-                            result.clear();
-                        }
-                    } catch (const std::exception& e2) {
-                        // Sanitization failed - create an error tool call to inform the model
-                        if (g_tool_parser_debug) {
-                            console::log("\033[90m[Parser debug: JSON array parse error (even after sanitization): %s]\033[0m\n", e2.what());
-                        }
-                        cli_tool_call error_call;
-                        error_call.name = "SYNTAX_ERROR";
-                        error_call.id = generate_tool_call_id();
-                        error_call.arguments = "{\"error\": \"Invalid JSON in tool call array: " + std::string(e2.what()) + ". Make sure to escape newlines as \\\\n and quotes as \\\\\\\" inside strings.\"}";
-                        result.push_back(error_call);
-                    }
+                } catch (...) {
+                    // Parse failed, continue searching
                 }
-                // Advance past this array
                 search_start = content.cbegin() + pos + arr_str.size();
             } else {
                 search_start = match.suffix().first;
@@ -289,147 +111,72 @@ std::vector<cli_tool_call> parse_tool_calls(
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Pattern 2: Individual JSON objects  {"name":..., "arguments":...}
-    // -------------------------------------------------------------------------
+    // Fallback Pattern 2: Individual JSON objects {"name":..., "arguments":...}
     if (result.empty()) {
-        // Use regex to find objects - tolerant to whitespace/newlines
         std::regex obj_start_regex(R"(\{\s*"name"\s*:)");
         std::smatch match;
         std::string::const_iterator search_start(content.cbegin());
 
         while (std::regex_search(search_start, content.cend(), match, obj_start_regex)) {
             size_t pos = std::distance(content.cbegin(), search_start) + match.position();
-            std::string extracted = extract_json_object(content, pos);
-            
-            if (!extracted.empty()) {
+
+            // Extract object
+            int depth = 0;
+            bool in_string = false;
+            bool escape_next = false;
+            std::string obj_str;
+
+            for (size_t i = pos; i < content.size(); ++i) {
+                char c = content[i];
+                if (escape_next) { escape_next = false; obj_str += c; continue; }
+                if (c == '\\' && in_string) { escape_next = true; obj_str += c; continue; }
+                if (c == '"') { in_string = !in_string; obj_str += c; continue; }
+                if (!in_string) {
+                    if (c == '{') depth++;
+                    else if (c == '}') {
+                        depth--;
+                        obj_str += c;
+                        if (depth == 0) break;
+                        continue;
+                    }
+                }
+                obj_str += c;
+            }
+
+            if (!obj_str.empty()) {
                 try {
-                    // Clean invisible characters before parsing
-                    std::string cleaned = clean_json_string(extracted);
-                    auto obj = json::parse(cleaned);
+                    auto obj = json::parse(obj_str);
                     if (obj.contains("name") && obj.contains("arguments")) {
                         cli_tool_call call;
-                        call.name      = obj.value("name", "");
-                        call.arguments = safe_extract_arguments(obj);
-                        call.id        = obj.value("id", obj.value("tool_call_id", ""));
+                        call.name = obj.value("name", "");
+                        call.arguments = obj["arguments"].is_string()
+                            ? obj["arguments"].get<std::string>()
+                            : obj["arguments"].dump();
+                        call.id = obj.value("id", obj.value("tool_call_id", ""));
                         if (call.id.empty()) {
                             call.id = generate_tool_call_id();
                         }
                         result.push_back(call);
                     }
-                } catch (const std::exception& e) {
-                    // Try to sanitize and re-parse (handles raw newlines in strings)
-                    try {
-                        std::string sanitized = sanitize_json_string_values(extracted);
-                        auto obj = json::parse(sanitized);
-                        if (obj.contains("name") && obj.contains("arguments")) {
-                            cli_tool_call call;
-                            call.name      = obj.value("name", "");
-                            call.arguments = safe_extract_arguments(obj);
-                            call.id        = obj.value("id", obj.value("tool_call_id", ""));
-                            if (call.id.empty()) {
-                                call.id = generate_tool_call_id();
-                            }
-                            result.push_back(call);
-                        }
-                    } catch (const std::exception& e2) {
-                        // Sanitization failed - create an error tool call to inform the model
-                        if (g_tool_parser_debug) {
-                            console::log("\033[90m[Parser debug: JSON object parse error (even after sanitization): %s]\033[0m\n", e2.what());
-                        }
-                        cli_tool_call error_call;
-                        error_call.name = "SYNTAX_ERROR";
-                        error_call.id = generate_tool_call_id();
-                        error_call.arguments = "{\"error\": \"Invalid JSON in tool call: " + std::string(e2.what()) + ". Make sure to escape newlines as \\\\n and quotes as \\\\\\\" inside strings.\"}";
-                        result.push_back(error_call);
-                    }
+                } catch (...) {
+                    // Parse failed, continue searching
                 }
-                // Always advance past the full object, not just +1
-                search_start = content.cbegin() + pos + extracted.size();
+                search_start = content.cbegin() + pos + obj_str.size();
             } else {
-                // Unbalanced braces at this position, advance
                 search_start = match.suffix().first;
             }
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Pattern 3: Markdown fenced block  ```tool_call\n{...}\n```
-    // -------------------------------------------------------------------------
-    if (result.empty()) {
-        // More robust: match any JSON-like content between ```tool_call and ```
-        std::regex tool_block_regex(R"(```tool_call\s*\n(\{[^`]+?\})\s*\n```)");
-        std::smatch match;
-        std::string::const_iterator search_start(content.cbegin());
-
-        while (std::regex_search(search_start, content.cend(), match, tool_block_regex)) {
-            try {
-                // Clean invisible characters before parsing
-                std::string cleaned = clean_json_string(match[1].str());
-                auto obj = json::parse(cleaned);
-                if (obj.contains("name") && obj.contains("arguments")) {
-                    cli_tool_call call;
-                    call.name      = obj.value("name", "");
-                    call.arguments = safe_extract_arguments(obj);
-                    call.id        = obj.value("id", "");
-                    if (call.id.empty()) {
-                        call.id = generate_tool_call_id();
-                    }
-                    result.push_back(call);
-                }
-            } catch (const std::exception& e) {
-                // Try to sanitize and re-parse (handles raw newlines in strings)
-                try {
-                    std::string sanitized = sanitize_json_string_values(match[1].str());
-                    auto obj = json::parse(sanitized);
-                    if (obj.contains("name") && obj.contains("arguments")) {
-                        cli_tool_call call;
-                        call.name      = obj.value("name", "");
-                        call.arguments = safe_extract_arguments(obj);
-                        call.id        = obj.value("id", "");
-                        if (call.id.empty()) {
-                            call.id = generate_tool_call_id();
-                        }
-                        result.push_back(call);
-                    }
-                } catch (const std::exception& e2) {
-                    // Sanitization failed - create an error tool call to inform the model
-                    if (g_tool_parser_debug) {
-                        console::log("\033[90m[Parser debug: Markdown block parse error (even after sanitization): %s]\033[0m\n", e2.what());
-                    }
-                    cli_tool_call error_call;
-                    error_call.name = "SYNTAX_ERROR";
-                    error_call.id = generate_tool_call_id();
-                    error_call.arguments = "{\"error\": \"Invalid JSON in markdown tool call block: " + std::string(e2.what()) + ". Make sure to escape newlines as \\\\n and quotes as \\\\\\\" inside strings.\"}";
-                    result.push_back(error_call);
-                }
-            }
-            search_start = match.suffix().first;
-        }
-    }
-
-    if (!result.empty() && g_tool_parser_debug)
+    if (!result.empty() && g_tool_parser_debug) {
         console::log("\033[90m[Parser debug: Found %zu tool calls]\033[0m\n", result.size());
+    }
 
     return result;
 }
 
 bool has_tool_calls(const std::string& content) {
     return !parse_tool_calls(content).empty();
-}
-
-cli_tool_call parse_json_tool_call(const std::string& json_str) {
-    cli_tool_call result;
-    try {
-        auto obj    = json::parse(json_str);
-        result.name = obj.value("name", "");
-        result.arguments = safe_extract_arguments(obj);
-        result.id   = obj.value("id", obj.value("tool_call_id", ""));
-        if (result.id.empty()) {
-            result.id = generate_tool_call_id();
-        }
-    } catch (...) {}
-    return result;
 }
 
 std::string format_tool_result(const cli_tool_result& result) {
@@ -657,6 +404,32 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << R"({"name": "shell", "arguments": {"command": "swift rss_fetcher.swift"}})" << "\n";
     oss << "[tool result: (output or error)]\n";
     oss << "Assistant: The script ran successfully.\n\n";
+
+    // --- File search tools ---
+    oss << "## Finding Files\n\n";
+    oss << "**`file_glob_search`** — Search for files matching a glob pattern:\n\n";
+    oss << "```json\n";
+    oss << R"({"name": "file_glob_search", "arguments": {"path": ".", "include": "**/*.cpp"}})" << "\n";
+    oss << "```\n";
+    oss << "- `path`: Base directory to search in\n";
+    oss << "- `include`: Glob pattern (e.g., `**/*.cpp`, `*.h`, `src/**/*`)\n";
+    oss << "- `exclude`: Optional glob pattern to exclude files\n\n";
+
+    oss << "**`grep_search`** — Search for a regex pattern in file contents:\n\n";
+    oss << "```json\n";
+    oss << R"({"name": "grep_search", "arguments": {"path": ".", "pattern": "TODO|FIXME", "return_line_numbers": true}})" << "\n";
+    oss << "```\n";
+    oss << "- `path`: File or directory to search in\n";
+    oss << "- `pattern`: Regular expression to search for\n";
+    oss << "- `include`: Optional glob pattern to filter files (default: `**`)\n";
+    oss << "- `exclude`: Optional glob pattern to exclude files\n";
+    oss << "- `return_line_numbers`: If true, include line numbers in results\n\n";
+
+    oss << "**Example workflow:**\n";
+    oss << "1. Use `file_glob_search` to find all `.swift` files\n";
+    oss << "2. Use `grep_search` to find all occurrences of a function name\n";
+    oss << "3. Use `read_file` to read the relevant files\n";
+    oss << "4. Use `search_replace` or `insert_line` to make changes\n\n";
 
     // --- Rules: short and unambiguous ---
     oss << "## Rules\n\n";
