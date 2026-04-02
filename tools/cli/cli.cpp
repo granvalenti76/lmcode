@@ -227,7 +227,20 @@ struct cli_context {
             }
 
             console::spinner::start();
+            
+            // Retry loop to handle HTTP_POLLING_SECONDS timeout (1s is too short for slow generation)
+            // Large files written via append_file can take 60-120+ seconds for full JSON generation
+            constexpr int GENERATION_TIMEOUT_SECONDS = 120;  // Max time to wait between tokens
+            constexpr int RETRY_INTERVAL_SECONDS = 1;        // Match HTTP_POLLING_SECONDS
+            int elapsed_seconds = 0;
+            
             server_task_result_ptr result = rd.next(should_stop);
+            
+            // If first result is null, keep waiting (model might be slow to start)
+            while (result == nullptr && !should_stop() && elapsed_seconds < GENERATION_TIMEOUT_SECONDS) {
+                elapsed_seconds += RETRY_INTERVAL_SECONDS;
+                result = rd.next(should_stop);
+            }
 
             console::spinner::stop();
             std::string curr_content;
@@ -283,7 +296,17 @@ struct cli_context {
                     out_timings = std::move(res_final->timings);
                     break;
                 }
+                
+                // Get next result with retry logic for intermediate timeouts
+                elapsed_seconds = 0;  // Reset counter for intermediate tokens
                 result = rd.next(should_stop);
+                
+                // If we get a null result mid-generation, wait a bit more before giving up
+                // This handles slow token generation (e.g., during long JSON tool calls)
+                while (result == nullptr && !should_stop() && elapsed_seconds < GENERATION_TIMEOUT_SECONDS) {
+                    elapsed_seconds += RETRY_INTERVAL_SECONDS;
+                    result = rd.next(should_stop);
+                }
             }
 
             g_is_interrupted.store(false);
