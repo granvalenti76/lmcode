@@ -19,16 +19,19 @@
 namespace cli_tui {
 
 // ANSI escape codes
-static const char* HIDE_CURSOR    = "\033[?25l";
-static const char* SHOW_CURSOR    = "\033[?25h";
+static const char* HIDE_CURSOR      = "\033[?25l";
+static const char* SHOW_CURSOR      = "\033[?25h";
 static const char* BLINK_BLOCK_CURSOR = "\033[1 q";
-static const char* MOVE_HOME      = "\033[H";
-static const char* COLOR_GRAY     = "\033[90m";
-static const char* COLOR_RED      = "\033[91m";
-static const char* COLOR_GREEN    = "\033[92m";
-static const char* COLOR_YELLOW   = "\033[93m";
-static const char* COLOR_BLUE     = "\033[94m";
-static const char* COLOR_RESET    = "\033[0m";
+static const char* MOVE_HOME        = "\033[H";
+static const char* COLOR_GRAY       = "\033[90m";
+static const char* COLOR_RED        = "\033[91m";
+static const char* COLOR_GREEN      = "\033[92m";
+static const char* COLOR_YELLOW     = "\033[93m";
+static const char* COLOR_BLUE       = "\033[94m";
+static const char* COLOR_CYAN       = "\033[96m";
+static const char* COLOR_BOLD       = "\033[1m";
+static const char* COLOR_DIM        = "\033[2m";
+static const char* COLOR_RESET      = "\033[0m";
 
 // ─────────────────────────────────────────────────────────────
 // Word-wrap helpers
@@ -173,6 +176,10 @@ static size_t g_last_line_count = 0;
 // Safety flag — if TUI breaks, fallback to console
 static std::atomic<bool> g_tui_broken{false};
 
+// Typing indicator state
+static bool g_is_typing = false;
+static int  g_typing_spinner = 0;
+
 // ─────────────────────────────────────────────────────────────
 // Terminal helpers
 // ─────────────────────────────────────────────────────────────
@@ -203,7 +210,10 @@ static void clear_to_end() {
 static void draw_separator() {
     int width = get_term_width();
     printf("%s", COLOR_GRAY);
-    for (int i = 0; i < width; i++) printf("─");
+    for (int i = 0; i < width; i++) {
+        if (i > 0 && i % 8 == 0) printf("┈");
+        else printf("─");
+    }
     printf("%s", COLOR_RESET);
     fflush(stdout);   // flush immediately so partial draws don't leave stale color
 }
@@ -242,6 +252,54 @@ static void push_text_to_buffer(const std::string& text) {
             start = nl + 1;
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Syntax highlighting for output lines
+// ─────────────────────────────────────────────────────────────
+static std::string colorize_line(const std::string& line) {
+    // Already has ANSI codes — don't double-colorize
+    if (line.find("\033[") != std::string::npos) return line;
+
+    // Errors in red
+    if (line.find("error") != std::string::npos ||
+        line.find("Error") != std::string::npos ||
+        line.find("ERROR") != std::string::npos ||
+        line.find("failed") != std::string::npos ||
+        line.find("Failed") != std::string::npos) {
+        return std::string(COLOR_RED) + line + COLOR_RESET;
+    }
+    // Warnings in yellow
+    if (line.find("warning") != std::string::npos ||
+        line.find("Warning") != std::string::npos ||
+        line.find("truncated") != std::string::npos) {
+        return std::string(COLOR_YELLOW) + line + COLOR_RESET;
+    }
+    // Success in green
+    if (line.find("success") != std::string::npos ||
+        line.find("Success") != std::string::npos ||
+        line.find("✓") != std::string::npos ||
+        line.find("created") != std::string::npos ||
+        line.find("Created") != std::string::npos ||
+        line.find("complete") != std::string::npos) {
+        return std::string(COLOR_GREEN) + line + COLOR_RESET;
+    }
+    // Tool execution in cyan
+    if (line.find("[tool:") != std::string::npos ||
+        line.find("[ ⚙️") != std::string::npos) {
+        return std::string(COLOR_CYAN) + line + COLOR_RESET;
+    }
+    // File paths in dim
+    if (line.find("/") != std::string::npos && line.size() < 80) {
+        return std::string(COLOR_DIM) + line + COLOR_RESET;
+    }
+    // Default
+    return line;
+}
+
+// Set typing indicator (called from print_stream)
+static void set_typing_indicator(bool active) {
+    g_is_typing = active;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -423,6 +481,7 @@ void print_stream(const char* text) {
     }
 
     g_streaming = true;
+    set_typing_indicator(true);
 
     int render_counter = 0;
     const int BATCH_SIZE = 10;  // Render every 10 chars
@@ -462,6 +521,7 @@ void flush_stream() {
         }
     }
     g_streaming = false;
+    set_typing_indicator(false);
     render();
 }
 
@@ -660,7 +720,7 @@ void render() {
         for (int i = 0; i < total_screen && row <= show_lines; i++, row++) {
             move_cursor(row, 1);
             clear_to_end();
-            printf("%s%s", COLOR_RESET, screen_lines[i].c_str());
+            printf("%s%s", COLOR_RESET, colorize_line(screen_lines[i]).c_str());
         }
 
         // Clear remaining output rows above UI bar
@@ -676,7 +736,10 @@ void render() {
 
         move_cursor(term_height - 2, 1);
         clear_to_end();
-        printf("%s> %s", COLOR_RESET, g_input_buffer.c_str());
+        // Styled input prompt with cyan color
+        printf("%s%s❯%s %s%s", COLOR_CYAN, COLOR_BOLD, COLOR_RESET, COLOR_BOLD, g_input_buffer.c_str());
+        printf("%s", COLOR_RESET);
+        // Position cursor correctly (accounting for "❯ " prefix = 2 chars)
         move_cursor(term_height - 2, 3 + (int)g_cursor_pos);
 
         move_cursor(term_height - 1, 1);
@@ -685,14 +748,31 @@ void render() {
 
         move_cursor(term_height, 1);
         clear_to_end();
-        if (!g_stats_line.empty()) {
-            printf("%s%s", COLOR_RESET, g_stats_line.c_str());
+
+        // Stats line with typing indicator
+        if (g_is_typing) {
+            g_typing_spinner = (g_typing_spinner + 1) % 4;
+            const char* spinner_chars[] = {"⠋", "⠙", "⠹", "⠸"};
+            printf("%s%s Generating%s", COLOR_CYAN, spinner_chars[g_typing_spinner], COLOR_RESET);
+            if (!g_stats_line.empty()) {
+                printf("  %s%s%s", COLOR_DIM, g_stats_line.c_str(), COLOR_RESET);
+            }
+        } else if (!g_stats_line.empty()) {
+            printf("%s%s%s", COLOR_DIM, g_stats_line.c_str(), COLOR_RESET);
         }
 
         // Show scroll indicator if scrolled back
         if (g_scroll_offset > 0) {
             int scroll_pct = total_lines > 0 ? (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
-            printf(" %s[scroll %d%%]%s", COLOR_GRAY, scroll_pct, COLOR_RESET);
+            // Fancy scroll bar
+            int bar_width = 8;
+            int filled = (scroll_pct * bar_width) / 100;
+            printf(" %s[", COLOR_CYAN);
+            for (int i = 0; i < bar_width; i++) {
+                if (i < filled) printf("█");
+                else printf("░");
+            }
+            printf(" %d%%]%s", scroll_pct, COLOR_RESET);
         }
 
         fflush(stdout);
@@ -723,7 +803,7 @@ void set_stats_line(const char* text) {
     move_cursor(term_height, 1);
     clear_to_end();
     if (!g_stats_line.empty())
-        printf("%s%s", COLOR_RESET, g_stats_line.c_str());
+        printf("%s%s%s", COLOR_DIM, g_stats_line.c_str(), COLOR_RESET);
     fflush(stdout);
 }
 
