@@ -10,6 +10,7 @@
 #include <iostream>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <termios.h>
@@ -64,9 +65,16 @@ static int visible_len(const std::string& s) {
 // Split a single logical line into screen-width chunks for rendering.
 // Preserves ANSI codes (they don't count toward width).
 // Each chunk gets COLOR_RESET appended so colors never bleed into the next row.
+// Empty lines are preserved (return at least one empty screen line).
 static std::vector<std::string> wrap_line(const std::string& line, int width) {
     std::vector<std::string> result;
     if (width <= 0) width = 80;
+
+    // Handle empty lines explicitly
+    if (line.empty()) {
+        result.push_back(std::string() + COLOR_RESET);
+        return result;
+    }
 
     std::string current;
     int vis = 0;
@@ -111,6 +119,7 @@ static std::vector<std::string> wrap_line(const std::string& line, int width) {
         }
     }
 
+    // Always push remaining content (even if empty, to preserve blank lines)
     if (!current.empty() || result.empty())
         result.push_back(current + COLOR_RESET);
 
@@ -151,11 +160,15 @@ static std::string g_stats_line;
 // and push completed lines to g_output_buffer as they arrive.
 // This makes text appear token-by-token AND handles newlines correctly.
 static std::string g_stream_current_line;   // line currently being assembled
+static std::mutex  g_stream_mutex;           // protects g_stream_current_line
 static bool        g_streaming = false;     // true while model is generating
 
 // Render throttling
 static std::atomic<long long> g_last_render_ms{0};
 static const int RENDER_THROTTLE_MS = 33;  // ~30 FPS max for render
+
+// Dirty region tracking — skip redraw if output hasn't changed
+static size_t g_last_line_count = 0;
 
 // ─────────────────────────────────────────────────────────────
 // Terminal helpers
@@ -387,6 +400,7 @@ void end_bulk_print()   { g_suppress_render = false; render(); }
 //   g_output_buffer and rendering happens immediately so the user sees
 //   text appear token-by-token.
 // - Render is throttled to ~30 FPS to avoid O(n^2) on fast streams.
+// - Thread-safe: mutex protects g_stream_current_line.
 void print_stream(const char* text) {
     if (!g_enabled || !g_initialized) {
         printf("%s", text);
@@ -399,11 +413,17 @@ void print_stream(const char* text) {
     for (const char* p = text; *p; ++p) {
         if (*p == '\n') {
             // Commit the completed line to the buffer and show it
-            g_output_buffer.push_line(g_stream_current_line);
-            g_stream_current_line.clear();
+            {
+                std::lock_guard<std::mutex> lock(g_stream_mutex);
+                g_output_buffer.push_line(g_stream_current_line);
+                g_stream_current_line.clear();
+            }
             if (!g_suppress_render && should_render()) render();
         } else {
-            g_stream_current_line += *p;
+            {
+                std::lock_guard<std::mutex> lock(g_stream_mutex);
+                g_stream_current_line += *p;
+            }
             // Throttled render so user sees tokens appear live without O(n^2)
             if (!g_suppress_render && should_render()) render();
         }
@@ -414,9 +434,12 @@ void print_stream(const char* text) {
 void flush_stream() {
     if (!g_enabled || !g_initialized) return;
 
-    if (!g_stream_current_line.empty()) {
-        g_output_buffer.push_line(g_stream_current_line);
-        g_stream_current_line.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        if (!g_stream_current_line.empty()) {
+            g_output_buffer.push_line(g_stream_current_line);
+            g_stream_current_line.clear();
+        }
     }
     g_streaming = false;
     render();
@@ -567,8 +590,11 @@ void render() {
     // ── Collect lines with viewport scroll ─────────────────────
     // During streaming, append the partial current line as a "live" entry
     auto all_lines = g_output_buffer.get_visible_lines(0);
-    if (g_streaming && !g_stream_current_line.empty()) {
-        all_lines.push_back(g_stream_current_line);
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        if (g_streaming && !g_stream_current_line.empty()) {
+            all_lines.push_back(g_stream_current_line);
+        }
     }
     int total_lines = (int)all_lines.size();
 
@@ -582,35 +608,42 @@ void render() {
     int scroll_start = total_lines - max_output - g_scroll_offset;
     if (scroll_start < 0) scroll_start = 0;
 
+    // Dirty region tracking: skip full redraw if nothing changed
+    // (still need to redraw input cursor position, so we always redraw UI bar)
+    bool content_changed = (all_lines.size() != g_last_line_count);
+    g_last_line_count = all_lines.size();
+
     // ── Clear & redraw ─────────────────────────────────────────
     // FIX: Don't clear entire screen (causes flickering).
     // Each line is cleared individually with clear_to_end() below.
-    printf("%s%s", COLOR_RESET, MOVE_HOME);
+    if (content_changed) {
+        printf("%s%s", COLOR_RESET, MOVE_HOME);
 
-    // Expand logical lines → wrapped screen-lines respecting term_width
-    std::vector<std::string> screen_lines;
-    screen_lines.reserve(total_lines);
-    for (int i = scroll_start; i < total_lines; i++) {
-        auto wrapped = wrap_line(all_lines[i], term_width);
-        for (auto& w : wrapped) screen_lines.push_back(std::move(w));
+        // Expand logical lines → wrapped screen-lines respecting term_width
+        std::vector<std::string> screen_lines;
+        screen_lines.reserve(total_lines);
+        for (int i = scroll_start; i < total_lines; i++) {
+            auto wrapped = wrap_line(all_lines[i], term_width);
+            for (auto& w : wrapped) screen_lines.push_back(std::move(w));
+        }
+        int total_screen = (int)screen_lines.size();
+        int show_lines = (total_screen > max_output) ? max_output : total_screen;
+
+        int row = 1;
+        for (int i = 0; i < total_screen && row <= show_lines; i++, row++) {
+            move_cursor(row, 1);
+            clear_to_end();
+            printf("%s%s", COLOR_RESET, screen_lines[i].c_str());
+        }
+
+        // Clear remaining output rows above UI bar
+        for (; row <= max_output; row++) {
+            move_cursor(row, 1);
+            clear_to_end();
+        }
     }
-    int total_screen = (int)screen_lines.size();
-    int show_lines = (total_screen > max_output) ? max_output : total_screen;
 
-    int row = 1;
-    for (int i = 0; i < total_screen && row <= show_lines; i++, row++) {
-        move_cursor(row, 1);
-        clear_to_end();
-        printf("%s%s", COLOR_RESET, screen_lines[i].c_str());
-    }
-
-    // Clear remaining output rows above UI bar
-    for (; row <= max_output; row++) {
-        move_cursor(row, 1);
-        clear_to_end();
-    }
-
-    // ── UI bar ─────────────────────────────────────────────────
+    // ── UI bar (always redraw for cursor position) ─────────────
     move_cursor(term_height - 3, 1);
     clear_to_end();
     draw_separator();
