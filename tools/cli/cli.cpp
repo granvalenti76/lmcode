@@ -245,6 +245,9 @@ struct cli_context {
             console::spinner::stop();
             std::string curr_content;
             bool is_thinking = false;  // For native reasoning_content tracking
+            
+            // Novità: Nascondiamo l'output se stiamo ricostruendo un JSON frammentato
+            bool hiding_tool_json = !pending_incomplete_json.empty();
 
             while (result) {
                 if (should_stop()) {
@@ -264,15 +267,48 @@ struct cli_context {
                     out_timings = std::move(res_partial->timings);
                     for (const auto & diff : res_partial->oaicompat_msg_diffs) {
                         if (!diff.content_delta.empty()) {
-                            // Add to history always
+                            // Aggiungi sempre alla history per il parsing
                             curr_content += diff.content_delta;
 
-                            // Print content (debug mode shows everything including reasoning)
-                            if (cli_tui::is_enabled()) {
-                                cli_tui::print_stream(diff.content_delta.c_str());
+                            // Se siamo in debug (/debug attivato), mostra il JSON grezzo rovesciato a schermo
+                            if (g_tool_parser_debug) {
+                                if (cli_tui::is_enabled()) {
+                                    cli_tui::print_stream(diff.content_delta.c_str());
+                                } else {
+                                    console::log("%s", diff.content_delta.c_str());
+                                    console::flush();
+                                }
                             } else {
-                                console::log("%s", diff.content_delta.c_str());
-                                console::flush();
+                                // Logica Beautifier a Latenza Zero
+                                if (!hiding_tool_json) {
+                                    // Identifichiamo l'inizio di una chiamata tool (anche se arriva in più token)
+                                    if (curr_content.find("{\"name\":") != std::string::npos ||
+                                        curr_content.find("[{\"name\":") != std::string::npos) {
+                                        
+                                        hiding_tool_json = true;
+                                        
+                                        // ANSI Magic: \r torna a inizio riga, \033[K cancella la riga.
+                                        // Cancella il frammento '{"name":' appena stampato e lo abbellisce.
+                                        const char* ui_msg = "\r\033[K\033[36m[ ⚙️ Ricezione dati tool... ]\033[0m";
+                                        
+                                        if (cli_tui::is_enabled()) {
+                                            cli_tui::print_stream(ui_msg);
+                                        } else {
+                                            console::log("%s", ui_msg);
+                                            console::flush();
+                                        }
+                                    } else {
+                                        // Stampa il testo normale istantaneamente (zero latenza)
+                                        if (cli_tui::is_enabled()) {
+                                            cli_tui::print_stream(diff.content_delta.c_str());
+                                        } else {
+                                            console::log("%s", diff.content_delta.c_str());
+                                            console::flush();
+                                        }
+                                    }
+                                }
+                                // Se hiding_tool_json è true, ingoiamo i token del JSON nel vuoto
+                                // Verranno passati al parser a fine generazione ma non sporcheranno lo schermo
                             }
                         }
                         if (!diff.reasoning_content_delta.empty()) {
@@ -609,9 +645,10 @@ struct cli_context {
 
         // Show compact status line
         if (g_tool_parser_debug) {
-            console::log("\033[90m[tool:%s running]\033[0m\n", call.name.c_str());
+            console::log("\n\033[90m[tool:%s running]\033[0m\n", call.name.c_str());
         } else {
-            console::log("\033[90m[tool:%s working...]\033[0m", call.name.c_str());
+            // ANSI Magic: \r\033[K cancella il widget precedente "Ricezione dati tool..."
+            console::log("\r\033[K\033[90m[ ⚙️ Esecuzione: %s... ]\033[0m\n", call.name.c_str());
             console::flush();
         }
 
@@ -623,7 +660,8 @@ struct cli_context {
                 console::log("\033[90m[tool:%s waiting for confirmation]\033[0m\n", call.name.c_str());
             }
             console::set_display(DISPLAY_TYPE_USER_INPUT);
-            console::log("\033[1mConfirm? [y/N]: \033[0m");
+            // Non usiamo \n qui così l'utente digita sulla stessa riga
+            console::log("\r\033[K\033[1mEseguire '%s'? [y/N]: \033[0m", call.name.c_str());
             console::flush();
 
             std::string line;
