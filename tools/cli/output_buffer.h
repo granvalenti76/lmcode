@@ -32,10 +32,22 @@ public:
     // Get scroll offset (how many lines have scrolled off screen)
     int scroll_offset() const { return scroll_offset_; }
 
+    // Get the current viewport offset (for scrolling back through history)
+    int viewport_offset() const { return viewport_offset_; }
+
+    // Set the viewport offset (negative = scroll back, 0 = at bottom)
+    void set_viewport_offset(int offset) { viewport_offset_ = offset; }
+
+    // Get lines for a specific viewport window
+    // viewport_offset: 0 = bottom (latest), positive = scroll back
+    // max_lines: how many lines to return
+    std::vector<std::string> get_viewport_lines(int max_lines) const;
+
 private:
     mutable std::mutex mutex_;
     std::deque<std::string> lines_;
     int scroll_offset_ = 0;  // Number of lines that have scrolled off
+    int viewport_offset_ = 0;  // User scroll offset (0 = at bottom)
 };
 
 // Global buffer instance

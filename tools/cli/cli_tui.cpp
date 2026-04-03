@@ -9,6 +9,7 @@
 #include <vector>
 #include <iostream>
 #include <atomic>
+#include <chrono>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <termios.h>
@@ -22,6 +23,10 @@ static const char* SHOW_CURSOR    = "\033[?25h";
 static const char* BLINK_BLOCK_CURSOR = "\033[1 q";
 static const char* MOVE_HOME      = "\033[H";
 static const char* COLOR_GRAY     = "\033[90m";
+static const char* COLOR_RED      = "\033[91m";
+static const char* COLOR_GREEN    = "\033[92m";
+static const char* COLOR_YELLOW   = "\033[93m";
+static const char* COLOR_BLUE     = "\033[94m";
 static const char* COLOR_RESET    = "\033[0m";
 
 // ─────────────────────────────────────────────────────────────
@@ -130,6 +135,14 @@ static std::string g_input_buffer;
 static size_t      g_cursor_pos = 0;
 static bool        g_eof_detected = false;  // Track if EOF was detected in read_input()
 
+// Input history (command history, like bash)
+static std::vector<std::string> g_input_history;
+static int         g_history_index = -1;  // -1 = not navigating history
+static const int   MAX_HISTORY = 500;
+
+// Scroll state
+static int         g_scroll_offset = 0;  // 0 = at bottom, positive = scrolled back
+
 // Stats line
 static std::string g_stats_line;
 
@@ -139,6 +152,10 @@ static std::string g_stats_line;
 // This makes text appear token-by-token AND handles newlines correctly.
 static std::string g_stream_current_line;   // line currently being assembled
 static bool        g_streaming = false;     // true while model is generating
+
+// Render throttling
+static std::atomic<long long> g_last_render_ms{0};
+static const int RENDER_THROTTLE_MS = 33;  // ~30 FPS max for render
 
 // ─────────────────────────────────────────────────────────────
 // Terminal helpers
@@ -178,6 +195,19 @@ static void draw_separator() {
 static void handle_resize(int /*signum*/) {
     // FIX: Only set flag in signal handler (printf/render are not async-signal-safe)
     g_resize_needed.store(true);
+}
+
+// Render throttle: only render if enough time has passed
+static bool should_render() {
+    auto now = std::chrono::steady_clock::now();
+    long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+    long long last = g_last_render_ms.load();
+    if (now_ms - last >= RENDER_THROTTLE_MS) {
+        g_last_render_ms.store(now_ms);
+        return true;
+    }
+    return false;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -356,6 +386,7 @@ void end_bulk_print()   { g_suppress_render = false; render(); }
 // - Whenever a '\n' is encountered, the completed line is committed to
 //   g_output_buffer and rendering happens immediately so the user sees
 //   text appear token-by-token.
+// - Render is throttled to ~30 FPS to avoid O(n^2) on fast streams.
 void print_stream(const char* text) {
     if (!g_enabled || !g_initialized) {
         printf("%s", text);
@@ -370,13 +401,11 @@ void print_stream(const char* text) {
             // Commit the completed line to the buffer and show it
             g_output_buffer.push_line(g_stream_current_line);
             g_stream_current_line.clear();
-            if (!g_suppress_render) render();
+            if (!g_suppress_render && should_render()) render();
         } else {
             g_stream_current_line += *p;
-            // Render on every character so the user sees tokens appear live.
-            // If this is too slow on your hardware you can render every N chars:
-            //   if (g_stream_current_line.size() % 4 == 0) render();
-            if (!g_suppress_render) render();
+            // Throttled render so user sees tokens appear live without O(n^2)
+            if (!g_suppress_render && should_render()) render();
         }
     }
 }
@@ -396,6 +425,9 @@ void flush_stream() {
 std::string read_input() {
     g_eof_detected = false;  // Reset EOF flag for each call
 
+    // Reset scroll when user starts typing
+    g_scroll_offset = 0;
+
     if (!g_enabled || !g_initialized) {
         printf("> ");
         fflush(stdout);
@@ -407,6 +439,7 @@ std::string read_input() {
 
     g_input_buffer.clear();
     g_cursor_pos = 0;
+    g_history_index = -1;
     render();
 
     while (true) {
@@ -418,38 +451,75 @@ std::string read_input() {
         }
 
         if (c == 27) {
-            char seq[4];
+            char seq[4] = {0, 0, 0, 0};  // Zero-init to avoid garbage
             ssize_t n1 = read(STDIN_FILENO, &seq[0], 1);
             if (n1 == 1 && seq[0] == '[') {
                 ssize_t n2 = read(STDIN_FILENO, &seq[1], 1);
                 if (n2 == 1) {
                     // Mouse events — discard and re-render
                     if (seq[1] == 'M' || seq[1] == '<') {
-                        if (seq[1] == 'M') read(STDIN_FILENO, &seq[2], 3);
-                        else {
+                        if (seq[1] == 'M') {
+                            char mouse_buf[3];
+                            if (read(STDIN_FILENO, mouse_buf, 3) < 0) {}
+                        } else {
                             for (int i = 2; i < 4; i++) {
-                                read(STDIN_FILENO, &seq[i], 1);
-                                if (seq[i] == 'm' || seq[i] == 'M') break;
+                                char b = 0;
+                                if (read(STDIN_FILENO, &b, 1) < 0) break;
+                                if (b == 'm' || b == 'M') break;
                             }
                         }
                         render();
                         continue;
                     }
-                    // Page Up/Down → Home/End of input
+                    // Page Up/Down → scroll output
                     if (seq[1] == '5' || seq[1] == '6') {
-                        read(STDIN_FILENO, &seq[2], 1);
-                        if (seq[2] == '~') {
-                            if (seq[1] == '5') { g_cursor_pos = 0; render(); }
-                            else               { g_cursor_pos = g_input_buffer.size(); render(); }
+                        char tilde = 0;
+                        if (read(STDIN_FILENO, &tilde, 1) > 0 && tilde == '~') {
+                            int term_height = get_term_height();
+                            int scroll_amount = term_height - 5;  // One page
+                            if (scroll_amount < 1) scroll_amount = 1;
+                            if (seq[1] == '5') scroll_output(-scroll_amount);  // Page Up
+                            else               scroll_output(scroll_amount);   // Page Down
                             continue;
                         }
                     }
+                    // Up/Down arrow → input history
+                    if (seq[1] == 'A') {  // Up
+                        if (g_history_index < 0 && !g_input_history.empty()) {
+                            g_history_index = (int)g_input_history.size() - 1;
+                            g_input_buffer = g_input_history.back();
+                            g_cursor_pos = g_input_buffer.size();
+                            render();
+                        } else if (g_history_index > 0) {
+                            g_history_index--;
+                            g_input_buffer = g_input_history[g_history_index];
+                            g_cursor_pos = g_input_buffer.size();
+                            render();
+                        }
+                        continue;
+                    }
+                    if (seq[1] == 'B') {  // Down
+                        if (g_history_index >= 0) {
+                            g_history_index++;
+                            if (g_history_index >= (int)g_input_history.size()) {
+                                g_history_index = -1;
+                                g_input_buffer.clear();
+                            } else {
+                                g_input_buffer = g_input_history[g_history_index];
+                            }
+                            g_cursor_pos = g_input_buffer.size();
+                            render();
+                        }
+                        continue;
+                    }
+                    // Left/Right arrow → cursor movement
                     if      (seq[1] == 'C' && g_cursor_pos < g_input_buffer.size()) { g_cursor_pos++; render(); }
                     else if (seq[1] == 'D' && g_cursor_pos > 0)                     { g_cursor_pos--; render(); }
                     else if (seq[1] == '3' && g_cursor_pos < g_input_buffer.size()) {
                         g_input_buffer.erase(g_cursor_pos, 1);
                         render();
-                        read(STDIN_FILENO, &seq[2], 1); // consume '~'
+                        char tilde = 0;
+                        read(STDIN_FILENO, &tilde, 1); // consume '~'
                     }
                 }
             }
@@ -460,12 +530,24 @@ std::string read_input() {
             if (g_cursor_pos > 0) { g_cursor_pos--; g_input_buffer.erase(g_cursor_pos, 1); render(); }
             continue;
         }
-        if (c == '\n' || c == '\r') break;
-        if (c == 3) {  // Ctrl-C: clear input, signal handler already set g_is_interrupted
-            g_input_buffer.clear();
+        if (c == '\n' || c == '\r') {
+            // Save to history (avoid duplicates)
+            if (!g_input_buffer.empty()) {
+                if (g_input_history.empty() || g_input_history.back() != g_input_buffer) {
+                    g_input_history.push_back(g_input_buffer);
+                    if ((int)g_input_history.size() > MAX_HISTORY) {
+                        g_input_history.erase(g_input_history.begin());
+                    }
+                }
+            }
             break;
         }
-        if (c == 12) { g_output_buffer.clear(); render(); continue; } // Ctrl-L clear
+        if (c == 3) {  // Ctrl-C: clear input, signal handler already set g_is_interrupted
+            g_input_buffer.clear();
+            g_history_index = -1;
+            break;
+        }
+        if (c == 12) { g_output_buffer.clear(); g_scroll_offset = 0; render(); continue; } // Ctrl-L clear
         if (c >= 32 && c < 127) {
             g_input_buffer.insert(g_cursor_pos, 1, c);
             g_cursor_pos++;
@@ -482,7 +564,7 @@ void render() {
     int term_width  = get_term_width();
     (void)term_width;
 
-    // ── Collect lines ──────────────────────────────────────────
+    // ── Collect lines with viewport scroll ─────────────────────
     // During streaming, append the partial current line as a "live" entry
     auto all_lines = g_output_buffer.get_visible_lines(0);
     if (g_streaming && !g_stream_current_line.empty()) {
@@ -495,6 +577,11 @@ void render() {
     int max_output = term_height - ui_lines;
     if (max_output < 1) max_output = 1;
 
+    // Apply scroll offset: g_scroll_offset = 0 means show bottom
+    // g_scroll_offset > 0 means show lines further back
+    int scroll_start = total_lines - max_output - g_scroll_offset;
+    if (scroll_start < 0) scroll_start = 0;
+
     // ── Clear & redraw ─────────────────────────────────────────
     // FIX: Don't clear entire screen (causes flickering).
     // Each line is cleared individually with clear_to_end() below.
@@ -503,18 +590,24 @@ void render() {
     // Expand logical lines → wrapped screen-lines respecting term_width
     std::vector<std::string> screen_lines;
     screen_lines.reserve(total_lines);
-    for (int i = 0; i < total_lines; i++) {
+    for (int i = scroll_start; i < total_lines; i++) {
         auto wrapped = wrap_line(all_lines[i], term_width);
         for (auto& w : wrapped) screen_lines.push_back(std::move(w));
     }
     int total_screen = (int)screen_lines.size();
-    int start_idx = (total_screen > max_output) ? (total_screen - max_output) : 0;
+    int show_lines = (total_screen > max_output) ? max_output : total_screen;
 
     int row = 1;
-    for (int i = start_idx; i < total_screen && row <= max_output; i++, row++) {
+    for (int i = 0; i < total_screen && row <= show_lines; i++, row++) {
         move_cursor(row, 1);
         clear_to_end();
         printf("%s%s", COLOR_RESET, screen_lines[i].c_str());
+    }
+
+    // Clear remaining output rows above UI bar
+    for (; row <= max_output; row++) {
+        move_cursor(row, 1);
+        clear_to_end();
     }
 
     // ── UI bar ─────────────────────────────────────────────────
@@ -537,6 +630,12 @@ void render() {
     clear_to_end();
     if (!g_stats_line.empty()) {
         printf("%s%s", COLOR_RESET, g_stats_line.c_str());
+    }
+
+    // Show scroll indicator if scrolled back
+    if (g_scroll_offset > 0) {
+        int scroll_pct = total_lines > 0 ? (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
+        printf(" %s[scroll %d%%]%s", COLOR_GRAY, scroll_pct, COLOR_RESET);
     }
 
     fflush(stdout);
@@ -567,8 +666,26 @@ void set_stats_line(const char* text) {
     fflush(stdout);
 }
 
-void scroll_output(int /*lines*/) {
-    // TODO: implement real scroll by adjusting a viewport offset in output_buffer
+void scroll_output(int lines) {
+    if (!g_enabled || !g_initialized) return;
+
+    auto all_lines = g_output_buffer.get_visible_lines(0);
+    int total = (int)all_lines.size();
+    int term_height = get_term_height();
+    int max_output = term_height - 4;  // UI rows
+    if (max_output < 1) max_output = 1;
+
+    g_scroll_offset += lines;
+    if (g_scroll_offset < 0) g_scroll_offset = 0;
+    if (g_scroll_offset > total - max_output) g_scroll_offset = total - max_output;
+    if (g_scroll_offset < 0) g_scroll_offset = 0;
+
+    render();
+}
+
+void scroll_to_bottom() {
+    g_scroll_offset = 0;
+    render();
 }
 
 bool was_eof() {

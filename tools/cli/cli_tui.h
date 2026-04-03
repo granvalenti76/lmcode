@@ -81,4 +81,7 @@ void set_stats_line(const char* text);
 // Scroll output up/down (positive = down, negative = up)
 void scroll_output(int lines);
 
+// Reset scroll to bottom
+void scroll_to_bottom();
+
 }  // namespace cli_tui

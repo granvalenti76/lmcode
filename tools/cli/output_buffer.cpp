@@ -70,4 +70,23 @@ void output_buffer::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     lines_.clear();
     scroll_offset_ = 0;
+    viewport_offset_ = 0;
+}
+
+std::vector<std::string> output_buffer::get_viewport_lines(int max_lines) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<std::string> result;
+    int total = static_cast<int>(lines_.size());
+    if (total == 0 || max_lines <= 0) return result;
+
+    // viewport_offset_ = 0 means show the last max_lines (bottom)
+    // viewport_offset_ > 0 means scroll back that many lines
+    int start = total - max_lines - viewport_offset_;
+    if (start < 0) start = 0;
+    int count = std::min(max_lines, total - start);
+
+    auto it = lines_.begin() + start;
+    result.assign(it, it + count);
+    return result;
 }
