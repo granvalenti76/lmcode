@@ -21,7 +21,6 @@ namespace cli_tui {
 static const char* HIDE_CURSOR      = "\033[?25l";
 static const char* SHOW_CURSOR      = "\033[?25h";
 static const char* BLINK_BLOCK_CURSOR = "\033[1 q";
-static const char* MOVE_HOME        = "\033[H";
 static const char* COLOR_GRAY       = "\033[90m";
 static const char* COLOR_RED        = "\033[91m";
 static const char* COLOR_GREEN      = "\033[92m";
@@ -111,6 +110,9 @@ static int         g_scroll_offset = 0;  // 0 = at bottom, positive = scrolled b
 
 // Stats line
 static std::string g_stats_line;
+
+// Tool status (floating, not in buffer)
+static std::string g_tool_status;
 
 // Streaming state
 // FIX: instead of one big string, we keep a "current line being built"
@@ -702,9 +704,9 @@ void render() {
         }
         int total_lines = (int)all_lines.size();
 
-        // 4 UI rows: separator + input + separator + stats
-        int ui_lines   = 4;
-        int max_output = term_height - ui_lines - 1;
+        // ── FIXED: Calculate max_output correctly ────────────
+        int UI_ROWS = 4;  // separator + input + separator + stats
+        int max_output = term_height - UI_ROWS - 1;  // -1 for safety
         if (max_output < 5) max_output = 5;
 
         // Apply scroll offset
@@ -713,32 +715,19 @@ void render() {
 
         g_last_line_count = all_lines.size();
 
-        // ── Clear & redraw ─────────────────────────────────────────
-        printf("%s%s", COLOR_RESET, MOVE_HOME);
-        fflush(stdout);
-
-        // Expand logical lines → wrapped screen-lines with CURRENT term_width
-        std::vector<std::string> screen_lines;
-        screen_lines.reserve(std::min((size_t)500, (size_t)total_lines));
-        for (int i = scroll_start; i < total_lines && i < scroll_start + max_output; i++) {
-            auto wrapped = wrap_line(all_lines[i], term_width);
-            for (auto& w : wrapped) {
-                if (screen_lines.size() >= 500) break;
-                screen_lines.push_back(std::move(w));
-            }
-            if (screen_lines.size() >= 500) break;
-        }
-        int total_screen = (int)screen_lines.size();
-        int show_lines = (total_screen > max_output) ? max_output : total_screen;
-
+        // ── FIXED: Render output without complex wrapping ────
         int row = 1;
-        for (int i = 0; i < total_screen && row <= show_lines; i++, row++) {
+        for (int i = scroll_start; i < total_lines && row <= max_output; i++, row++) {
             move_cursor(row, 1);
             clear_to_end();
-            printf("%s%s", COLOR_RESET, colorize_line(screen_lines[i]).c_str());
+            std::string line = all_lines[i];
+            if (line.find("\033[") == std::string::npos) {
+                line = colorize_line(line);
+            }
+            printf("%s%s", COLOR_RESET, line.c_str());
         }
 
-        // Clear remaining output rows above UI bar
+        // Clear remaining output rows
         for (; row <= max_output; row++) {
             move_cursor(row, 1);
             clear_to_end();
@@ -776,28 +765,15 @@ void render() {
         clear_to_end();
         draw_divider_elegant(term_width);
 
-        // ── STATS LINE ─────────────────────────────────────────────
+        // ── STATS/TOOL STATUS LINE ───────────────────────────
         move_cursor(term_height, 1);
         clear_to_end();
 
-        if (!g_stats_line.empty()) {
+        if (!g_tool_status.empty()) {
+            printf("  %s[⚙️  %s]%s", COLOR_CYAN, g_tool_status.c_str(), COLOR_RESET);
+        } else if (!g_stats_line.empty()) {
             printf("  %s%s%s", COLOR_GRAY, g_stats_line.c_str(), COLOR_RESET);
-
-            // Scroll indicator if scrolled back
-            if (g_scroll_offset > 0) {
-                int scroll_pct = total_lines > 0 ?
-                    (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
-                int bar_width = 8;
-                int filled = (scroll_pct * bar_width) / 100;
-                printf(" %s[", COLOR_CYAN);
-                for (int i = 0; i < bar_width; i++) {
-                    if (i < filled) printf("█");
-                    else printf("░");
-                }
-                printf(" %d%%]%s", scroll_pct, COLOR_RESET);
-            }
         } else {
-            // Idle state
             printf("  %s✓ Ready%s", COLOR_GRAY, COLOR_RESET);
         }
 
@@ -854,6 +830,12 @@ void scroll_output(int lines) {
 
 void scroll_to_bottom() {
     g_scroll_offset = 0;
+    render();
+}
+
+void set_tool_status(const char* status) {
+    if (!g_enabled || !g_initialized) return;
+    g_tool_status = status ? status : "";
     render();
 }
 

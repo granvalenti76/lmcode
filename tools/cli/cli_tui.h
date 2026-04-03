@@ -84,4 +84,7 @@ void scroll_output(int lines);
 // Reset scroll to bottom
 void scroll_to_bottom();
 
+// Tool status display (doesn't add to buffer)
+void set_tool_status(const char* status);
+
 }  // namespace cli_tui
