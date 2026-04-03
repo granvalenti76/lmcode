@@ -22,6 +22,12 @@ void init();
 // Cleanup TUI (call before exit)
 void cleanup();
 
+// Enable TUI mode (call after init() to switch from console to TUI)
+void enable();
+
+// Disable TUI mode (call to switch back to console mode)
+void disable();
+
 // Print a line to the output buffer (thread-safe)
 // This replaces console::log() when TUI is enabled
 void print(const char* fmt, ...);
@@ -40,6 +46,9 @@ void flush_stream();
 // Read a line of input with TUI interface
 // Returns the input string
 std::string read_input();
+
+// Check if EOF was detected during last read_input() call
+bool was_eof();
 
 // Render the entire screen (output + input box)
 // Call this periodically to refresh the display

@@ -1030,6 +1030,11 @@ int main(int argc, char ** argv) {
             // Use TUI input box if enabled, otherwise fallback to console::readline
             if (cli_tui::is_enabled()) {
                 buffer = cli_tui::read_input();
+                // EOF detected (e.g., input from pipe), exit gracefully
+                if (cli_tui::was_eof()) {
+                    console::log("\n");
+                    goto end_chat_loop;
+                }
             } else {
                 console::log("\n> ");
                 std::string line;
@@ -1037,6 +1042,11 @@ int main(int argc, char ** argv) {
                 do {
                     another_line = console::readline(line, params.multiline_input);
                     buffer += line;
+                    // EOF detected (e.g., input from pipe), exit gracefully
+                    if (line.empty() && !another_line) {
+                        console::log("\n");
+                        goto end_chat_loop;
+                    }
                 } while (another_line);
             }
         } else {
@@ -1170,15 +1180,15 @@ int main(int argc, char ** argv) {
             continue;
         } else if (string_starts_with(buffer, "/tui")) {
             std::string cmd = string_strip(buffer.substr(4));
-            if (cmd == "on" || cmd.empty()) {
-                cli_tui::set_enabled(true);
+            if (cmd == "on") {
+                cli_tui::enable();
                 if (cli_tui::is_enabled()) {
                     cli_tui::print("TUI mode enabled.\n");
                 } else {
-                    console::log("TUI mode enabled.\n");
+                    console::log("TUI mode enabled (requires valid terminal).\n");
                 }
             } else if (cmd == "off") {
-                cli_tui::set_enabled(false);
+                cli_tui::disable();
                 if (cli_tui::is_enabled()) {
                     cli_tui::print("TUI mode disabled. Use Ctrl+C to exit.\n");
                 } else {
@@ -1335,6 +1345,7 @@ int main(int argc, char ** argv) {
         }
     }
 
+end_chat_loop:
     console::set_display(DISPLAY_TYPE_RESET);
     console::log("\nExiting...\n");
     ctx_cli.ctx_server.terminate();

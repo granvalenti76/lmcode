@@ -113,7 +113,7 @@ static std::vector<std::string> wrap_line(const std::string& line, int width) {
 }
 
 // Terminal state
-static bool     g_enabled     = true;
+static bool     g_enabled     = false;  // Disabled by default - use /tui on to enable
 static bool     g_initialized = false;
 static termios  g_initial_state;
 static bool     g_term_valid  = false;
@@ -128,6 +128,7 @@ static bool g_suppress_render = false;
 // Input state
 static std::string g_input_buffer;
 static size_t      g_cursor_pos = 0;
+static bool        g_eof_detected = false;  // Track if EOF was detected in read_input()
 
 // Stats line
 static std::string g_stats_line;
@@ -212,18 +213,53 @@ void init() {
 
     if (tcgetattr(STDIN_FILENO, &g_initial_state) == 0) {
         g_term_valid = true;
-        struct termios raw = g_initial_state;
-        raw.c_lflag &= ~(ICANON | ECHO);
-        raw.c_cc[VMIN]  = 1;
-        raw.c_cc[VTIME] = 0;
-        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-    }
+        // Only set raw mode if TUI is enabled
+        if (g_enabled) {
+            struct termios raw = g_initial_state;
+            raw.c_lflag &= ~(ICANON | ECHO);
+            raw.c_cc[VMIN]  = 1;
+            raw.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 
-    printf("%s%s", HIDE_CURSOR, BLINK_BLOCK_CURSOR);
-    fflush(stdout);
+            printf("%s%s", HIDE_CURSOR, BLINK_BLOCK_CURSOR);
+            fflush(stdout);
+        }
+    }
 
     signal(SIGWINCH, handle_resize);
     g_initialized = true;
+}
+
+// Enable TUI mode (call after init() to switch from console to TUI)
+void enable() {
+    if (!g_initialized || !g_term_valid || g_enabled) return;
+
+    g_enabled = true;
+
+    // Set raw mode
+    struct termios raw = g_initial_state;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN]  = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+    printf("%s%s", HIDE_CURSOR, BLINK_BLOCK_CURSOR);
+    fflush(stdout);
+}
+
+// Disable TUI mode (call to switch back to console mode)
+void disable() {
+    if (!g_initialized || !g_enabled) return;
+
+    g_enabled = false;
+
+    // Restore terminal mode
+    if (g_term_valid) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_initial_state);
+    }
+
+    printf("%s%s", SHOW_CURSOR, COLOR_RESET);
+    fflush(stdout);
 }
 
 void cleanup() {
@@ -358,11 +394,14 @@ void flush_stream() {
 }
 
 std::string read_input() {
+    g_eof_detected = false;  // Reset EOF flag for each call
+
     if (!g_enabled || !g_initialized) {
         printf("> ");
         fflush(stdout);
         std::string line;
         if (std::getline(std::cin, line)) return line;
+        g_eof_detected = true;  // EOF detected
         return "";
     }
 
@@ -373,7 +412,10 @@ std::string read_input() {
     while (true) {
         char c;
         ssize_t n = read(STDIN_FILENO, &c, 1);
-        if (n <= 0) break;
+        if (n <= 0) {
+            g_eof_detected = true;  // EOF detected
+            break;
+        }
 
         if (c == 27) {
             char seq[4];
@@ -502,7 +544,11 @@ void render() {
 
 bool is_enabled()           { return g_enabled; }
 void set_enabled(bool enabled) {
-    g_enabled = enabled;
+    if (enabled && !g_enabled) {
+        enable();
+    } else if (!enabled && g_enabled) {
+        disable();
+    }
     if (enabled) render();
 }
 void force_redraw()         { render(); }
@@ -523,6 +569,10 @@ void set_stats_line(const char* text) {
 
 void scroll_output(int /*lines*/) {
     // TODO: implement real scroll by adjusting a viewport offset in output_buffer
+}
+
+bool was_eof() {
+    return g_eof_detected;
 }
 
 }  // namespace cli_tui
