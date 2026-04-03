@@ -9,7 +9,6 @@
 #include <vector>
 #include <iostream>
 #include <atomic>
-#include <chrono>
 #include <mutex>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -68,9 +67,10 @@ static int visible_len(const std::string& s) {
 // Preserves ANSI codes (they don't count toward width).
 // Each chunk gets COLOR_RESET appended so colors never bleed into the next row.
 // Empty lines are preserved (return at least one empty screen line).
+// NOTE: UTF-8 wrapping is intentionally NOT done here — the terminal handles it.
 static std::vector<std::string> wrap_line(const std::string& line, int width) {
     std::vector<std::string> result;
-    if (width <= 0) width = 80;
+    (void)width;  // Terminal handles wrapping
 
     // Handle empty lines explicitly
     if (line.empty()) {
@@ -78,53 +78,8 @@ static std::vector<std::string> wrap_line(const std::string& line, int width) {
         return result;
     }
 
-    std::string current;
-    int vis = 0;
-    bool in_esc = false;
-
-    for (size_t i = 0; i < line.size(); ) {
-        unsigned char c = (unsigned char)line[i];
-
-        if (in_esc) {
-            current += (char)c;
-            if (c >= 0x40 && c <= 0x7E) in_esc = false;
-            i++;
-        } else if (c == 0x1B) {
-            current += (char)c;
-            in_esc = true;
-            i++;
-        } else if (c >= 0x80) {
-            // UTF-8 multi-byte char
-            size_t char_len = 1;
-            if      ((c & 0xF0) == 0xF0) char_len = 4;
-            else if ((c & 0xE0) == 0xE0) char_len = 3;
-            else if ((c & 0xC0) == 0xC0) char_len = 2;
-
-            if (vis >= width) {
-                result.push_back(current + COLOR_RESET);
-                current.clear();
-                vis = 0;
-            }
-            for (size_t j = 0; j < char_len && i + j < line.size(); j++)
-                current += line[i + j];
-            vis++;
-            i += char_len;
-        } else {
-            if (vis >= width) {
-                result.push_back(current + COLOR_RESET);
-                current.clear();
-                vis = 0;
-            }
-            current += (char)c;
-            vis++;
-            i++;
-        }
-    }
-
-    // Always push remaining content (even if empty, to preserve blank lines)
-    if (!current.empty() || result.empty())
-        result.push_back(current + COLOR_RESET);
-
+    // Simple: pass through as-is, let terminal handle wrapping
+    result.push_back(line + COLOR_RESET);
     return result;
 }
 
@@ -180,8 +135,7 @@ static bool g_is_typing = false;
 
 // ── Apple HIG: Advanced Animation State ────────────────────────────
 static int g_animation_frame = 0;
-static std::chrono::steady_clock::time_point g_last_animation_time = std::chrono::steady_clock::now();
-static bool g_show_cursor = true;
+static int g_render_frame_counter = 0;
 
 // ── Braille spinner (smooth animation) ──────────────────────────────
 static const char* SPINNER_FRAMES[] = {
@@ -201,15 +155,7 @@ static Status get_current_status() {
 
 // ── Get animation frame ────────────────────────────────────────────
 static int get_animation_frame() {
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - g_last_animation_time).count();
-
-    if (elapsed > 80) {  // Update every 80ms for smooth animation
-        g_animation_frame = (g_animation_frame + 1) % SPINNER_FRAMES_COUNT;
-        g_last_animation_time = now;
-    }
-
+    g_animation_frame = (g_animation_frame + 1) % SPINNER_FRAMES_COUNT;
     return g_animation_frame;
 }
 
@@ -247,19 +193,9 @@ static const char* get_status_color() {
     }
 }
 
-// ── Smooth blinking cursor ────────────────────────────────────────
+// ── Smooth blinking cursor (counter-based, no chrono) ──────────────
 static bool should_show_cursor() {
-    static auto last_blink = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - last_blink).count();
-
-    if (elapsed > 500) {  // Blink every 500ms
-        g_show_cursor = !g_show_cursor;
-        last_blink = now;
-    }
-
-    return g_show_cursor;
+    return (g_render_frame_counter / 15) % 2 == 0;
 }
 
 // ── Draw elegant divider ─────────────────────────────────────────
@@ -746,6 +682,8 @@ std::string read_input() {
 void render() {
     if (!g_enabled || !g_initialized) return;
 
+    g_render_frame_counter++;
+
     try {
         int term_height = get_term_height();
         int term_width  = get_term_width();
@@ -764,10 +702,10 @@ void render() {
         }
         int total_lines = (int)all_lines.size();
 
-        // 5 UI rows: separator, input, separator, stats (+ 1 safety margin)
-        int ui_lines   = 5;
-        int max_output = term_height - ui_lines;
-        if (max_output < 1) max_output = 1;
+        // 4 UI rows: separator + input + separator + stats
+        int ui_lines   = 4;
+        int max_output = term_height - ui_lines - 1;
+        if (max_output < 5) max_output = 5;
 
         // Apply scroll offset
         int scroll_start = total_lines - max_output - g_scroll_offset;
