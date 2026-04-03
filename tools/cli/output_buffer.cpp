@@ -10,10 +10,18 @@ output_buffer::output_buffer() {
 
 void output_buffer::push_line(const std::string& line) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lines_.push_back(line);
-    
-    // Keep buffer size reasonable (max 10000 lines)
-    while (lines_.size() > 10000) {
+
+    // Truncate lines that are too long
+    std::string safe_line = line;
+    if (safe_line.size() > MAX_LINE_LENGTH) {
+        safe_line.resize(MAX_LINE_LENGTH);
+        safe_line += "...";
+    }
+
+    lines_.push_back(safe_line);
+
+    // Keep buffer bounded
+    while (lines_.size() > MAX_BUFFER_LINES) {
         lines_.pop_front();
         scroll_offset_++;
     }

@@ -165,10 +165,13 @@ static bool        g_streaming = false;     // true while model is generating
 
 // Render throttling
 static std::atomic<long long> g_last_render_ms{0};
-static const int RENDER_THROTTLE_MS = 33;  // ~30 FPS max for render
+static const int RENDER_THROTTLE_MS = 50;  // ~20 FPS max for render
 
 // Dirty region tracking — skip redraw if output hasn't changed
 static size_t g_last_line_count = 0;
+
+// Safety flag — if TUI breaks, fallback to console
+static std::atomic<bool> g_tui_broken{false};
 
 // ─────────────────────────────────────────────────────────────
 // Terminal helpers
@@ -358,7 +361,8 @@ void process_resize() {
 
 // FIX: use a dynamic buffer to avoid the 4096-byte truncation
 void print(const char* fmt, ...) {
-    if (!g_enabled || !g_initialized) {
+    // Fallback to console if TUI is broken
+    if (g_tui_broken || !g_enabled || !g_initialized) {
         va_list args;
         va_start(args, fmt);
         vprintf(fmt, args);
@@ -367,28 +371,37 @@ void print(const char* fmt, ...) {
         return;
     }
 
-    // Try stack buffer first, fall back to heap if needed
-    char   stack_buf[4096];
-    char*  buf     = stack_buf;
-    size_t buf_len = sizeof(stack_buf);
+    try {
+        // Try stack buffer first, fall back to heap if needed
+        char   stack_buf[4096];
+        char*  buf     = stack_buf;
+        size_t buf_len = sizeof(stack_buf);
 
-    va_list args, args2;
-    va_start(args, fmt);
-    va_copy(args2, args);
-    int needed = vsnprintf(stack_buf, buf_len, fmt, args);
-    va_end(args);
+        va_list args, args2;
+        va_start(args, fmt);
+        va_copy(args2, args);
+        int needed = vsnprintf(stack_buf, buf_len, fmt, args);
+        va_end(args);
 
-    std::string heap_buf;
-    if (needed >= (int)buf_len) {
-        heap_buf.resize(needed + 1);
-        vsnprintf(&heap_buf[0], heap_buf.size(), fmt, args2);
-        buf = &heap_buf[0];
+        std::string heap_buf;
+        if (needed >= (int)buf_len) {
+            heap_buf.resize(needed + 1);
+            vsnprintf(&heap_buf[0], heap_buf.size(), fmt, args2);
+            buf = &heap_buf[0];
+        }
+        va_end(args2);
+
+        // FIX: split by newlines so each logical line is a separate buffer entry
+        push_text_to_buffer(buf);
+        if (!g_suppress_render) render();
+    } catch (...) {
+        g_tui_broken = true;
+        va_list args;
+        va_start(args, fmt);
+        vprintf(fmt, args);
+        va_end(args);
+        fflush(stdout);
     }
-    va_end(args2);
-
-    // FIX: split by newlines so each logical line is a separate buffer entry
-    push_text_to_buffer(buf);
-    if (!g_suppress_render) render();
 }
 
 void begin_bulk_print() { g_suppress_render = true; }
@@ -399,10 +412,11 @@ void end_bulk_print()   { g_suppress_render = false; render(); }
 // - Whenever a '\n' is encountered, the completed line is committed to
 //   g_output_buffer and rendering happens immediately so the user sees
 //   text appear token-by-token.
-// - Render is throttled to ~30 FPS to avoid O(n^2) on fast streams.
+// - Render is throttled to ~20 FPS to avoid O(n^2) on fast streams.
 // - Thread-safe: mutex protects g_stream_current_line.
+// - Batch rendering: render every 10 chars to reduce flicker.
 void print_stream(const char* text) {
-    if (!g_enabled || !g_initialized) {
+    if (g_tui_broken || !g_enabled || !g_initialized) {
         printf("%s", text);
         fflush(stdout);
         return;
@@ -410,22 +424,28 @@ void print_stream(const char* text) {
 
     g_streaming = true;
 
+    int render_counter = 0;
+    const int BATCH_SIZE = 10;  // Render every 10 chars
+
     for (const char* p = text; *p; ++p) {
         if (*p == '\n') {
-            // Commit the completed line to the buffer and show it
             {
                 std::lock_guard<std::mutex> lock(g_stream_mutex);
                 g_output_buffer.push_line(g_stream_current_line);
                 g_stream_current_line.clear();
             }
+            render_counter = 0;
             if (!g_suppress_render && should_render()) render();
         } else {
             {
                 std::lock_guard<std::mutex> lock(g_stream_mutex);
                 g_stream_current_line += *p;
             }
-            // Throttled render so user sees tokens appear live without O(n^2)
-            if (!g_suppress_render && should_render()) render();
+            render_counter++;
+            if (render_counter >= BATCH_SIZE && !g_suppress_render && should_render()) {
+                render();
+                render_counter = 0;
+            }
         }
     }
 }
@@ -572,6 +592,8 @@ std::string read_input() {
         }
         if (c == 12) { g_output_buffer.clear(); g_scroll_offset = 0; render(); continue; } // Ctrl-L clear
         if (c >= 32 && c < 127) {
+            // Limit input buffer to 4096 chars
+            if (g_input_buffer.size() >= 4096) continue;
             g_input_buffer.insert(g_cursor_pos, 1, c);
             g_cursor_pos++;
             render();
@@ -583,48 +605,53 @@ std::string read_input() {
 void render() {
     if (!g_enabled || !g_initialized) return;
 
-    int term_height = get_term_height();
-    int term_width  = get_term_width();
-    (void)term_width;
+    try {
+        int term_height = get_term_height();
+        int term_width  = get_term_width();
 
-    // ── Collect lines with viewport scroll ─────────────────────
-    // During streaming, append the partial current line as a "live" entry
-    auto all_lines = g_output_buffer.get_visible_lines(0);
-    {
-        std::lock_guard<std::mutex> lock(g_stream_mutex);
-        if (g_streaming && !g_stream_current_line.empty()) {
-            all_lines.push_back(g_stream_current_line);
+        // Sanity check: terminal too small
+        if (term_height < 10 || term_width < 20) return;
+
+        (void)term_width;
+
+        // ── Collect lines with viewport scroll ─────────────────────
+        auto all_lines = g_output_buffer.get_visible_lines(0);
+        {
+            std::lock_guard<std::mutex> lock(g_stream_mutex);
+            if (g_streaming && !g_stream_current_line.empty()) {
+                all_lines.push_back(g_stream_current_line);
+            }
         }
-    }
-    int total_lines = (int)all_lines.size();
+        int total_lines = (int)all_lines.size();
 
-    // 4 fixed UI rows: separator, input, separator, stats
-    int ui_lines   = 4;
-    int max_output = term_height - ui_lines;
-    if (max_output < 1) max_output = 1;
+        // 4 fixed UI rows: separator, input, separator, stats
+        int ui_lines   = 4;
+        int max_output = term_height - ui_lines;
+        if (max_output < 1) max_output = 1;
 
-    // Apply scroll offset: g_scroll_offset = 0 means show bottom
-    // g_scroll_offset > 0 means show lines further back
-    int scroll_start = total_lines - max_output - g_scroll_offset;
-    if (scroll_start < 0) scroll_start = 0;
+        // Apply scroll offset
+        int scroll_start = total_lines - max_output - g_scroll_offset;
+        if (scroll_start < 0) scroll_start = 0;
 
-    // Dirty region tracking: skip full redraw if nothing changed
-    // (still need to redraw input cursor position, so we always redraw UI bar)
-    bool content_changed = (all_lines.size() != g_last_line_count);
-    g_last_line_count = all_lines.size();
+        // Dirty region tracking
+        size_t current_line_count = all_lines.size();
+        (void)current_line_count;  // Used for future optimization
+        g_last_line_count = current_line_count;
 
-    // ── Clear & redraw ─────────────────────────────────────────
-    // FIX: Don't clear entire screen (causes flickering).
-    // Each line is cleared individually with clear_to_end() below.
-    if (content_changed) {
+        // ── Clear & redraw ─────────────────────────────────────────
         printf("%s%s", COLOR_RESET, MOVE_HOME);
+        fflush(stdout);
 
-        // Expand logical lines → wrapped screen-lines respecting term_width
+        // Expand logical lines → wrapped screen-lines
         std::vector<std::string> screen_lines;
-        screen_lines.reserve(total_lines);
-        for (int i = scroll_start; i < total_lines; i++) {
+        screen_lines.reserve(std::min((size_t)500, (size_t)total_lines));
+        for (int i = scroll_start; i < total_lines && i < scroll_start + max_output; i++) {
             auto wrapped = wrap_line(all_lines[i], term_width);
-            for (auto& w : wrapped) screen_lines.push_back(std::move(w));
+            for (auto& w : wrapped) {
+                if (screen_lines.size() >= 500) break;
+                screen_lines.push_back(std::move(w));
+            }
+            if (screen_lines.size() >= 500) break;
         }
         int total_screen = (int)screen_lines.size();
         int show_lines = (total_screen > max_output) ? max_output : total_screen;
@@ -641,37 +668,38 @@ void render() {
             move_cursor(row, 1);
             clear_to_end();
         }
+
+        // ── UI bar (always redraw for cursor position) ─────────────
+        move_cursor(term_height - 3, 1);
+        clear_to_end();
+        draw_separator();
+
+        move_cursor(term_height - 2, 1);
+        clear_to_end();
+        printf("%s> %s", COLOR_RESET, g_input_buffer.c_str());
+        move_cursor(term_height - 2, 3 + (int)g_cursor_pos);
+
+        move_cursor(term_height - 1, 1);
+        clear_to_end();
+        draw_separator();
+
+        move_cursor(term_height, 1);
+        clear_to_end();
+        if (!g_stats_line.empty()) {
+            printf("%s%s", COLOR_RESET, g_stats_line.c_str());
+        }
+
+        // Show scroll indicator if scrolled back
+        if (g_scroll_offset > 0) {
+            int scroll_pct = total_lines > 0 ? (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
+            printf(" %s[scroll %d%%]%s", COLOR_GRAY, scroll_pct, COLOR_RESET);
+        }
+
+        fflush(stdout);
+    } catch (const std::exception& e) {
+        g_tui_broken = true;
+        fprintf(stderr, "[TUI Error] %s\n", e.what());
     }
-
-    // ── UI bar (always redraw for cursor position) ─────────────
-    move_cursor(term_height - 3, 1);
-    clear_to_end();
-    draw_separator();
-
-    move_cursor(term_height - 2, 1);
-    clear_to_end();
-    // FIX: reset color before the input prompt so it's always white
-    printf("%s> %s", COLOR_RESET, g_input_buffer.c_str());
-    // Position cursor correctly (accounting for "> " prefix = 2 chars)
-    move_cursor(term_height - 2, 3 + (int)g_cursor_pos);
-
-    move_cursor(term_height - 1, 1);
-    clear_to_end();
-    draw_separator();
-
-    move_cursor(term_height, 1);
-    clear_to_end();
-    if (!g_stats_line.empty()) {
-        printf("%s%s", COLOR_RESET, g_stats_line.c_str());
-    }
-
-    // Show scroll indicator if scrolled back
-    if (g_scroll_offset > 0) {
-        int scroll_pct = total_lines > 0 ? (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
-        printf(" %s[scroll %d%%]%s", COLOR_GRAY, scroll_pct, COLOR_RESET);
-    }
-
-    fflush(stdout);
 }
 
 bool is_enabled()           { return g_enabled; }

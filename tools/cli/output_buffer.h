@@ -43,6 +43,10 @@ public:
     // max_lines: how many lines to return
     std::vector<std::string> get_viewport_lines(int max_lines) const;
 
+    // Bounded buffer limits
+    static constexpr size_t MAX_BUFFER_LINES = 5000;
+    static constexpr size_t MAX_LINE_LENGTH = 8192;
+
 private:
     mutable std::mutex mutex_;
     std::deque<std::string> lines_;
