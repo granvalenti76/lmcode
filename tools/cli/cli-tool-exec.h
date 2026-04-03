@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <set>
 
 // Security configuration for tool execution
 struct cli_tool_security_config {
@@ -67,6 +68,10 @@ public:
 
 private:
     cli_tool_security_config config_;
+
+    // Track files in active chunked-write sessions (start_file → append_file → finish_file)
+    // Prevents append_file from writing to arbitrary existing files
+    std::set<std::string> active_write_sessions_;
 
     // Tool-specific executors
     cli_tool_result execute_read_file(const cli_tool_call& call);

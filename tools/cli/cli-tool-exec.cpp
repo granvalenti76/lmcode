@@ -1232,6 +1232,12 @@ bool cli_tool_executor_impl::requires_confirmation(const cli_tool_call& call) co
         return true;
     }
 
+    // Chunked write chain: all three modify the file
+    if (call.name == "start_file" || call.name == "append_file" ||
+        call.name == "finish_file") {
+        return true;
+    }
+
     return false;
 }
 
@@ -1389,7 +1395,7 @@ cli_tool_result cli_tool_executor_impl::execute_write_file(const cli_tool_call& 
 cli_tool_result cli_tool_executor_impl::execute_start_file(const cli_tool_call& call) {
     auto args = parse_args(call.arguments);
     std::string path = get_arg(args, "path");
-    
+
     if (path.empty()) {
         cli_tool_result r; r.tool_call_id = call.id;
         r.error = "Missing required argument: path"; r.exit_code = -1;
@@ -1403,8 +1409,29 @@ cli_tool_result cli_tool_executor_impl::execute_start_file(const cli_tool_call& 
         return r;
     }
 
+    // Canonicalize path for consistent session tracking
+    std::string canonical_path;
+    try {
+        canonical_path = fs::weakly_canonical(fs::absolute(path)).string();
+    } catch (...) {
+        canonical_path = path;
+    }
+
+    // Track this file in the active write session
+    // If already in session, the previous session is being reset (file will be truncated)
+    bool was_active = active_write_sessions_.count(canonical_path) > 0;
+    active_write_sessions_.insert(canonical_path);
+
     auto result = cli_tool_exec::start_file(path);
     result.tool_call_id = call.id;
+
+    // Append session info to the result
+    if (was_active) {
+        result.content += " [WARNING: Previous write session for this file was reset]";
+    } else {
+        result.content += " [Write session started]";
+    }
+
     return result;
 }
 
@@ -1412,7 +1439,7 @@ cli_tool_result cli_tool_executor_impl::execute_append_file(const cli_tool_call&
     auto args = parse_args(call.arguments);
     std::string path = get_arg(args, "path");
     std::string content = get_arg(args, "content");
-    
+
     if (path.empty()) {
         cli_tool_result r; r.tool_call_id = call.id;
         r.error = "Missing required argument: path"; r.exit_code = -1;
@@ -1426,6 +1453,25 @@ cli_tool_result cli_tool_executor_impl::execute_append_file(const cli_tool_call&
         return r;
     }
 
+    // Canonicalize path for session check
+    std::string canonical_path;
+    try {
+        canonical_path = fs::weakly_canonical(fs::absolute(path)).string();
+    } catch (...) {
+        canonical_path = path;
+    }
+
+    // FIX #3: append_file only works on files started with start_file
+    if (active_write_sessions_.count(canonical_path) == 0) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "File is not in an active write session. "
+                  "Call start_file first to begin a chunked write session, "
+                  "then use append_file. Cannot append to arbitrary existing files.";
+        r.exit_code = -1;
+        r.success = false;
+        return r;
+    }
+
     auto result = cli_tool_exec::append_file(path, content);
     result.tool_call_id = call.id;
     return result;
@@ -1434,15 +1480,32 @@ cli_tool_result cli_tool_executor_impl::execute_append_file(const cli_tool_call&
 cli_tool_result cli_tool_executor_impl::execute_finish_file(const cli_tool_call& call) {
     auto args = parse_args(call.arguments);
     std::string path = get_arg(args, "path");
-    
+
     if (path.empty()) {
         cli_tool_result r; r.tool_call_id = call.id;
         r.error = "Missing required argument: path"; r.exit_code = -1;
         return r;
     }
 
+    // Canonicalize path for session cleanup
+    std::string canonical_path;
+    try {
+        canonical_path = fs::weakly_canonical(fs::absolute(path)).string();
+    } catch (...) {
+        canonical_path = path;
+    }
+
     auto result = cli_tool_exec::finish_file(path);
     result.tool_call_id = call.id;
+
+    // Remove from active write sessions (session complete)
+    // If not in session, the file was written outside the chunked chain — warn
+    if (active_write_sessions_.erase(canonical_path) > 0) {
+        result.content += " [Write session closed]";
+    } else {
+        result.content += " [WARNING: File was not started with start_file — session tracking skipped]";
+    }
+
     return result;
 }
 
