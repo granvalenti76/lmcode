@@ -105,7 +105,9 @@ struct cli_context {
     // Accumulates fragments of a JSON tool call that was split across multiple
     // generation turns due to n_predict truncation.  Cleared as soon as the
     // closing delimiter is received and the full JSON is successfully parsed.
+    // Capped at 64KB to prevent unbounded growth if model keeps producing fragments.
     std::string pending_incomplete_json;
+    static constexpr size_t MAX_PENDING_JSON = 65536;  // 64KB
 
     std::atomic<bool> loading_show;
 
@@ -434,6 +436,15 @@ struct cli_context {
                         // Accumulate the partial fragment so the next iteration can
                         // reconstruct the full JSON for parsing.
                         pending_incomplete_json += curr_content;
+
+                        // Cap size to prevent unbounded growth
+                        if (pending_incomplete_json.size() > MAX_PENDING_JSON) {
+                            console::log("\033[31m[Pending JSON exceeded max size (%zu bytes), discarding]\033[0m\n",
+                                MAX_PENDING_JSON);
+                            pending_incomplete_json.clear();
+                            model_has_more_to_say = false;
+                            break;
+                        }
 
                         // Do NOT push an assistant message yet — the message is not
                         // complete. We'll push it once we have the full JSON.

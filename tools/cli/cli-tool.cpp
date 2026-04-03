@@ -75,7 +75,7 @@ static const char* FINISH_FILE_SCHEMA = R"json({"type":"object","properties":{"p
 static const char* GET_FILE_INFO_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"}},"required":["path"]})json";
 static const char* VERIFY_FILE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"expected_hash":{"type":"string","description":"Expected djb2 hash as returned by append_file or finish_file"}},"required":["path","expected_hash"]})json";
 
-static const char* SEARCH_REPLACE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"search":{"type":"string","description":"Text to search for (must be unique)"},"replace":{"type":"string","description":"Text to replace with"}},"required":["path","search","replace"]})json";
+static const char* SEARCH_REPLACE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the file to modify"},"oldString":{"type":"string","description":"The exact text to replace (must match file contents exactly, including whitespace and indentation)"},"newString":{"type":"string","description":"The new text to replace oldString with"},"replaceAll":{"type":"boolean","description":"Replace all occurrences of oldString (default: false)"},"search":{"type":"string","description":"Alias for oldString (deprecated)"},"replace":{"type":"string","description":"Alias for newString (deprecated)"}},"required":["path","oldString","newString"]})json";
 static const char* GET_LINE_NUMBERS_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"}},"required":["path"]})json";
 static const char* SEARCH_REGEX_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"pattern":{"type":"string","description":"Regex pattern to search for"},"replace":{"type":"string","description":"Text to replace matches with"}},"required":["path","pattern","replace"]})json";
 
@@ -128,7 +128,7 @@ std::vector<cli_tool> get_default_tools() {
         {"get_file_info", "Get file size, newline count and hash — use to check state before resuming a partial write", GET_FILE_INFO_SCHEMA, true},
         {"verify_file", "Verify file integrity by comparing its hash against an expected value returned by finish_file", VERIFY_FILE_SCHEMA, true},
         // --- Surgical edits on existing files ---
-        {"search_replace", "Search for text and replace it (more robust than line numbers)", SEARCH_REPLACE_SCHEMA, false},
+        {"search_replace", "Search for text in a file and replace it. Supports fuzzy matching for whitespace, indentation, and escape differences. Use oldString/newString parameters.", SEARCH_REPLACE_SCHEMA, false},
         {"get_line_numbers", "Read file with line numbers prefixed (useful for finding exact positions)", GET_LINE_NUMBERS_SCHEMA, true},
         {"search_regex", "Search and replace using regex patterns (more powerful than exact match)", SEARCH_REGEX_SCHEMA, false},
         {"list_dir", "List contents of a directory", LIST_DIR_SCHEMA, true},

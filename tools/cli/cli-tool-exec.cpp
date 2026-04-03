@@ -11,6 +11,10 @@
 #include <nlohmann/json.hpp>
 #include <sys/wait.h>
 #include <unistd.h>  // for getpid()
+#include <functional>  // std::function
+#include <tuple>       // std::tuple
+#include <algorithm>   // std::sort, std::unique, std::count
+#include <climits>     // INT_MAX
 
 using json = nlohmann::ordered_json;
 
@@ -522,9 +526,475 @@ cli_tool_result verify_file(const std::string& path, const std::string& expected
     return result;
 }
 
+// ============================================================================
+// Smart Replace: Pipeline of replacer strategies (from TS edit-corrector pattern)
+// Tries increasingly permissive matching until a unique match is found.
+// ============================================================================
+
+// Levenshtein distance for fuzzy matching
+static int levenshtein_distance(const std::string& a, const std::string& b) {
+    if (a.empty()) return static_cast<int>(b.size());
+    if (b.empty()) return static_cast<int>(a.size());
+
+    const int m = static_cast<int>(a.size());
+    const int n = static_cast<int>(b.size());
+    std::vector<int> prev(n + 1), curr(n + 1);
+
+    for (int j = 0; j <= n; j++) prev[j] = j;
+    for (int i = 1; i <= m; i++) {
+        curr[0] = i;
+        for (int j = 1; j <= n; j++) {
+            int cost = (a[i-1] == b[j-1]) ? 0 : 1;
+            curr[j] = std::min({prev[j] + 1, curr[j-1] + 1, prev[j-1] + cost});
+        }
+        std::swap(prev, curr);
+    }
+    return prev[n];
+}
+
+static std::string trim(const std::string& s) {
+    auto start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    auto end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+static std::string normalize_line_endings(const std::string& s) {
+    std::string result = s;
+    size_t pos = 0;
+    while ((pos = result.find("\r\n", pos)) != std::string::npos) {
+        result.replace(pos, 2, "\n");
+    }
+    return result;
+}
+
+static std::string normalize_whitespace(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    bool prev_space = false;
+    for (char c : s) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!prev_space) { result += ' '; prev_space = true; }
+        } else {
+            result += c;
+            prev_space = false;
+        }
+    }
+    // Trim
+    auto start = result.find_first_not_of(' ');
+    if (start == std::string::npos) return "";
+    auto end = result.find_last_not_of(' ');
+    return result.substr(start, end - start + 1);
+}
+
+static std::string unescape_string(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            switch (s[i+1]) {
+                case 'n':  result += '\n'; i++; break;
+                case 't':  result += '\t'; i++; break;
+                case 'r':  result += '\r'; i++; break;
+                case '\\': result += '\\'; i++; break;
+                case '"':  result += '"';  i++; break;
+                case '\'': result += '\''; i++; break;
+                default:   result += s[i]; break;
+            }
+        } else {
+            result += s[i];
+        }
+    }
+    return result;
+}
+
+static std::string remove_indentation(const std::string& s) {
+    std::vector<std::string> lines;
+    std::istringstream iss(s);
+    std::string line;
+    int min_indent = INT_MAX;
+
+    while (std::getline(iss, line)) {
+        std::string trimmed = trim(line);
+        if (trimmed.empty()) { lines.push_back(line); continue; }
+        // Count leading whitespace more precisely
+        int ws = 0;
+        for (char c : line) { if (c == ' ' || c == '\t') ws++; else break; }
+        if (ws < min_indent) min_indent = ws;
+        lines.push_back(line);
+    }
+
+    if (min_indent == INT_MAX || min_indent == 0) return s;
+
+    std::string result;
+    for (auto& l : lines) {
+        std::string trimmed_l = trim(l);
+        if (trimmed_l.empty()) { result += l + "\n"; continue; }
+        int ws = 0;
+        for (char c : l) { if (c == ' ' || c == '\t') ws++; else break; }
+        result += l.substr(std::min(ws, min_indent)) + "\n";
+    }
+    // Remove trailing newline added above
+    if (!result.empty() && result.back() == '\n') result.pop_back();
+    return result;
+}
+
+// Split string into lines
+static std::vector<std::string> split_lines(const std::string& s) {
+    std::vector<std::string> lines;
+    std::istringstream iss(s);
+    std::string line;
+    while (std::getline(iss, line)) {
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+// Compute byte offset of line index in content
+static size_t line_offset(const std::string& content, int line_idx) {
+    size_t offset = 0;
+    for (int i = 0; i < line_idx; i++) {
+        offset += content[offset] == '\r' && offset + 1 < content.size() && content[offset+1] == '\n'
+            ? content[offset] == '\r' ? 2 : 1 : 1;
+        // Simpler: just find the line
+    }
+    // Recalculate properly
+    offset = 0;
+    for (int i = 0; i < line_idx; i++) {
+        size_t nl = content.find('\n', offset);
+        if (nl == std::string::npos) break;
+        offset = nl + 1;
+    }
+    return offset;
+}
+
+// Extract substring from start_line to end_line (inclusive)
+static std::string extract_block(const std::string& content, int start_line, int end_line) {
+    auto lines = split_lines(content);
+    if (start_line < 0 || end_line >= static_cast<int>(lines.size()) || start_line > end_line) return "";
+
+    size_t start_off = line_offset(content, start_line);
+    size_t end_off;
+    if (end_line + 1 < static_cast<int>(lines.size())) {
+        end_off = line_offset(content, end_line + 1);
+        // Remove trailing newline
+        if (end_off > 0 && content[end_off - 1] == '\n') end_off--;
+    } else {
+        end_off = content.size();
+    }
+    return content.substr(start_off, end_off - start_off);
+}
+
+// Similarity ratio between two strings (0.0 to 1.0)
+static double similarity_ratio(const std::string& a, const std::string& b) {
+    std::string ta = trim(a), tb = trim(b);
+    if (ta == tb) return 1.0;
+    if (ta.empty() && tb.empty()) return 1.0;
+    if (ta.empty() || tb.empty()) return 0.0;
+    int max_len = std::max(static_cast<int>(ta.size()), static_cast<int>(tb.size()));
+    if (max_len == 0) return 1.0;
+    int dist = levenshtein_distance(ta, tb);
+    return 1.0 - static_cast<double>(dist) / max_len;
+}
+
+// Replacer strategy: returns list of candidate matches found in content
+using ReplacerFn = std::function<std::vector<std::string>(const std::string&, const std::string&)>;
+
+// 1. SimpleReplacer — exact match
+static std::vector<std::string> simple_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    size_t pos = 0;
+    while ((pos = content.find(search, pos)) != std::string::npos) {
+        results.push_back(search);
+        pos += search.size();
+    }
+    return results;
+}
+
+// 2. LineTrimmedReplacer — match line-by-line ignoring leading/trailing whitespace
+static std::vector<std::string> line_trimmed_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    auto orig_lines = split_lines(content);
+    auto search_lines = split_lines(search);
+
+    // Remove trailing empty line from search
+    if (!search_lines.empty() && search_lines.back().empty()) search_lines.pop_back();
+    if (search_lines.empty() || orig_lines.size() < search_lines.size()) return results;
+
+    for (size_t i = 0; i <= orig_lines.size() - search_lines.size(); i++) {
+        bool matches = true;
+        for (size_t j = 0; j < search_lines.size(); j++) {
+            if (trim(orig_lines[i + j]) != trim(search_lines[j])) { matches = false; break; }
+        }
+        if (matches) {
+            size_t start_off = line_offset(content, static_cast<int>(i));
+            int end_line_idx = static_cast<int>(i + search_lines.size() - 1);
+            size_t end_off;
+            if (end_line_idx + 1 < static_cast<int>(orig_lines.size())) {
+                end_off = line_offset(content, end_line_idx + 1);
+                if (end_off > 0 && content[end_off - 1] == '\n') end_off--;
+            } else {
+                end_off = content.size();
+            }
+            results.push_back(content.substr(start_off, end_off - start_off));
+        }
+    }
+    return results;
+}
+
+// 3. BlockAnchorReplacer — match first and last line as anchors, use Levenshtein for middle
+static std::vector<std::string> block_anchor_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    auto orig_lines = split_lines(content);
+    auto search_lines = split_lines(search);
+
+    if (!search_lines.empty() && search_lines.back().empty()) search_lines.pop_back();
+    if (search_lines.size() < 3) return results;  // Need at least 3 lines for anchors
+
+    std::string first_anchor = trim(search_lines.front());
+    std::string last_anchor = trim(search_lines.back());
+    int search_block_size = static_cast<int>(search_lines.size());
+
+    // Find all candidate blocks where first and last anchors match
+    struct Candidate { int start; int end; };
+    std::vector<Candidate> candidates;
+
+    for (int i = 0; i < static_cast<int>(orig_lines.size()); i++) {
+        if (trim(orig_lines[i]) != first_anchor) continue;
+        for (int j = i + 2; j < static_cast<int>(orig_lines.size()); j++) {
+            if (trim(orig_lines[j]) == last_anchor) {
+                candidates.push_back({i, j});
+                break;
+            }
+        }
+    }
+
+    if (candidates.empty()) return results;
+
+    // Single candidate: accept if similarity >= 0.0 (anchors matched, that's enough)
+    if (candidates.size() == 1) {
+        auto& c = candidates[0];
+        results.push_back(extract_block(content, c.start, c.end));
+        return results;
+    }
+
+    // Multiple candidates: pick the one with highest middle-line similarity
+    int best_idx = -1;
+    double best_sim = -1.0;
+
+    for (int ci = 0; ci < static_cast<int>(candidates.size()); ci++) {
+        auto& c = candidates[ci];
+        int actual_block = c.end - c.start + 1;
+        int lines_to_check = std::min(search_block_size - 2, actual_block - 2);
+        double sim = 0.0;
+
+        if (lines_to_check > 0) {
+            for (int j = 1; j < search_block_size - 1 && j < actual_block - 1; j++) {
+                sim += similarity_ratio(orig_lines[c.start + j], search_lines[j]);
+            }
+            sim /= lines_to_check;
+        } else {
+            sim = 1.0;  // No middle lines, anchors are enough
+        }
+
+        if (sim > best_sim) { best_sim = sim; best_idx = ci; }
+    }
+
+    if (best_idx >= 0 && best_sim >= 0.3) {
+        auto& c = candidates[best_idx];
+        results.push_back(extract_block(content, c.start, c.end));
+    }
+    return results;
+}
+
+// 4. WhitespaceNormalizedReplacer — normalize all whitespace to single spaces
+static std::vector<std::string> whitespace_normalized_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    std::string norm_search = normalize_whitespace(search);
+
+    // Single-line matches
+    auto lines = split_lines(content);
+    for (const auto& line : lines) {
+        if (normalize_whitespace(line) == norm_search) {
+            results.push_back(line);
+        }
+    }
+
+    // Multi-line matches
+    auto search_lines = split_lines(search);
+    if (search_lines.size() > 1) {
+        for (size_t i = 0; i <= lines.size() - search_lines.size(); i++) {
+            std::string block;
+            for (size_t j = 0; j < search_lines.size(); j++) {
+                if (j > 0) block += "\n";
+                block += lines[i + j];
+            }
+            if (normalize_whitespace(block) == norm_search) {
+                results.push_back(block);
+            }
+        }
+    }
+    return results;
+}
+
+// 5. IndentationFlexibleReplacer — ignore indentation differences
+static std::vector<std::string> indentation_flexible_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    std::string norm_search = remove_indentation(search);
+    auto search_lines = split_lines(search);
+    auto content_lines = split_lines(content);
+
+    if (search_lines.empty()) return results;
+
+    for (size_t i = 0; i <= content_lines.size() - search_lines.size(); i++) {
+        std::string block;
+        for (size_t j = 0; j < search_lines.size(); j++) {
+            if (j > 0) block += "\n";
+            block += content_lines[i + j];
+        }
+        if (remove_indentation(block) == norm_search) {
+            results.push_back(block);
+        }
+    }
+    return results;
+}
+
+// 6. EscapeNormalizedReplacer — handle \n, \t, etc. in search string
+static std::vector<std::string> escape_normalized_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    std::string unescaped = unescape_string(search);
+
+    if (unescaped == search) return results;  // Nothing to unescape
+
+    // Direct match with unescaped version
+    size_t pos = 0;
+    while ((pos = content.find(unescaped, pos)) != std::string::npos) {
+        results.push_back(unescaped);
+        pos += unescaped.size();
+    }
+
+    // Also try line-by-line unescaping
+    auto lines = split_lines(content);
+    auto search_lines = split_lines(unescaped);
+    if (search_lines.size() > 1) {
+        for (size_t i = 0; i <= lines.size() - search_lines.size(); i++) {
+            std::string block;
+            for (size_t j = 0; j < search_lines.size(); j++) {
+                if (j > 0) block += "\n";
+                block += lines[i + j];
+            }
+            if (unescape_string(block) == unescaped) {
+                results.push_back(block);
+            }
+        }
+    }
+    return results;
+}
+
+// 7. TrimmedBoundaryReplacer — try trimmed version of search
+static std::vector<std::string> trimmed_boundary_replacer(const std::string& content, const std::string& search) {
+    std::vector<std::string> results;
+    std::string trimmed_search = trim(search);
+
+    if (trimmed_search == search) return results;  // Already trimmed
+
+    // Direct match
+    size_t pos = 0;
+    while ((pos = content.find(trimmed_search, pos)) != std::string::npos) {
+        results.push_back(trimmed_search);
+        pos += trimmed_search.size();
+    }
+
+    // Block match
+    auto lines = split_lines(content);
+    auto search_lines = split_lines(search);
+    for (size_t i = 0; i <= lines.size() - search_lines.size(); i++) {
+        std::string block;
+        for (size_t j = 0; j < search_lines.size(); j++) {
+            if (j > 0) block += "\n";
+            block += lines[i + j];
+        }
+        if (trim(block) == trimmed_search) {
+            results.push_back(block);
+        }
+    }
+    return results;
+}
+
+// Apply replacement: replace first (or all) occurrence(s) of `search` with `replace` in `content`
+// Returns {new_content, actual_match} or {original, ""} if not found
+static std::pair<std::string, std::string> apply_replace(
+    const std::string& content, const std::string& search, const std::string& replacement, bool replace_all = false)
+{
+    size_t pos = content.find(search);
+    if (pos == std::string::npos) return {content, ""};
+
+    if (replace_all) {
+        std::string result = content;
+        size_t search_pos = 0;
+        while ((search_pos = result.find(search, search_pos)) != std::string::npos) {
+            result.replace(search_pos, search.size(), replacement);
+            search_pos += replacement.size();
+        }
+        return {result, search};
+    }
+
+    // Check uniqueness for single replace
+    size_t pos2 = content.find(search, pos + search.size());
+    if (pos2 != std::string::npos) return {content, "__MULTI_MATCH__"};
+
+    std::string result = content;
+    result.replace(pos, search.size(), replacement);
+    return {result, search};
+}
+
+// Smart replace: tries multiple strategies in order
+static std::tuple<bool, std::string, std::string> smart_replace(
+    const std::string& content, const std::string& search, const std::string& replacement, bool replace_all = false)
+{
+    // Pipeline: try each replacer in order of strictness
+    static const std::vector<std::pair<std::string, ReplacerFn>> replacers = {
+        {"exact",          simple_replacer},
+        {"escape_norm",    escape_normalized_replacer},
+        {"line_trimmed",   line_trimmed_replacer},
+        {"block_anchor",   block_anchor_replacer},
+        {"whitespace_norm", whitespace_normalized_replacer},
+        {"indent_flexible", indentation_flexible_replacer},
+        {"trimmed_boundary", trimmed_boundary_replacer},
+    };
+
+    for (const auto& [name, replacer] : replacers) {
+        auto candidates = replacer(content, search);
+
+        // Deduplicate candidates
+        std::sort(candidates.begin(), candidates.end());
+        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+        for (const auto& candidate : candidates) {
+            auto [new_content, match] = apply_replace(content, candidate, replacement, replace_all);
+            if (match == "__MULTI_MATCH__") {
+                return {false, "Found multiple matches. Make the search string more unique, or use replaceAll=true to replace all occurrences.", ""};
+            }
+            if (!match.empty()) {
+                size_t search_lines = std::count(search.begin(), search.end(), '\n') + 1;
+                size_t replace_lines = std::count(replacement.begin(), replacement.end(), '\n') + 1;
+                std::string info = "Replaced " + std::to_string(search_lines) + " lines with " +
+                                  std::to_string(replace_lines) + " lines";
+                if (replace_all) info += " (all occurrences)";
+                if (name != "exact") info += " (matched via: " + name + ")";
+                return {true, info, new_content};
+            }
+        }
+    }
+
+    return {false, "Search string not found. Tried " + std::to_string(replacers.size()) +
+        " matching strategies. Make sure the search text matches the file content "
+        "(check whitespace, indentation, and line endings).", ""};
+}
+
 // Search and replace: find a unique block of text and replace it
 // More robust than line numbers because it doesn't break when file changes above
-cli_tool_result search_replace(const std::string& path, const std::string& search, const std::string& replace) {
+cli_tool_result search_replace(const std::string& path, const std::string& search, const std::string& replace, bool replace_all) {
     cli_tool_result result;
 
     try {
@@ -555,36 +1025,15 @@ cli_tool_result search_replace(const std::string& path, const std::string& searc
         std::string original = content.str();
         file.close();
 
-        // Find the search string
-        size_t pos = original.find(search);
-        if (pos == std::string::npos) {
-            result.error = "Search string not found in file. Make sure the text matches exactly (including whitespace and newlines).";
+        // Use smart replace pipeline
+        auto [success, info, new_content] = smart_replace(original, search, replace, replace_all);
+
+        if (!success) {
+            result.error = info;
             result.exit_code = 1;
             result.success = false;
             return result;
         }
-
-        // Check for multiple occurrences
-        size_t pos2 = original.find(search, pos + 1);
-        if (pos2 != std::string::npos) {
-            // Count occurrences manually
-            int count = 0;
-            size_t curr = 0;
-            while ((curr = original.find(search, curr)) != std::string::npos) {
-                count++;
-                curr += search.size();
-                if (count > 10) break;  // Cap at 10 for performance
-            }
-            result.error = "Search string found " + std::to_string(count) + 
-                          " times. Make the search string more unique.";
-            result.exit_code = 1;
-            result.success = false;
-            return result;
-        }
-
-        // Perform replacement
-        std::string new_content = original;
-        new_content.replace(pos, search.size(), replace);
 
         // Write atomically
         auto parent = fs::path(path).parent_path();
@@ -611,12 +1060,7 @@ cli_tool_result search_replace(const std::string& path, const std::string& searc
 
         fs::rename(tmp_path, path);
 
-        // Count lines changed for feedback
-        size_t search_lines = std::count(search.begin(), search.end(), '\n') + 1;
-        size_t replace_lines = std::count(replace.begin(), replace.end(), '\n') + 1;
-
-        result.content = "Replaced " + std::to_string(search_lines) + " lines with " + 
-                        std::to_string(replace_lines) + " lines in " + path;
+        result.content = info;
         result.exit_code = 0;
         result.success = true;
 
@@ -1512,17 +1956,24 @@ cli_tool_result cli_tool_executor_impl::execute_finish_file(const cli_tool_call&
 cli_tool_result cli_tool_executor_impl::execute_search_replace(const cli_tool_call& call) {
     auto args = parse_args(call.arguments);
     std::string path = get_arg(args, "path");
-    std::string search = get_arg(args, "search");
-    std::string replace = get_arg(args, "replace");
-    
+
+    // Accept both new (oldString/newString) and old (search/replace) parameter names
+    std::string old_string = get_arg(args, "oldString", "");
+    if (old_string.empty()) old_string = get_arg(args, "search", "");
+
+    std::string new_string = get_arg(args, "newString", "");
+    if (new_string.empty()) new_string = get_arg(args, "replace", "");
+
+    bool replace_all = args.value("replaceAll", false);
+
     if (path.empty()) {
         cli_tool_result r; r.tool_call_id = call.id;
         r.error = "Missing required argument: path"; r.exit_code = -1;
         return r;
     }
-    if (search.empty()) {
+    if (old_string.empty()) {
         cli_tool_result r; r.tool_call_id = call.id;
-        r.error = "Missing required argument: search"; r.exit_code = -1;
+        r.error = "Missing required argument: oldString (the text to search for and replace)"; r.exit_code = -1;
         return r;
     }
 
@@ -1533,7 +1984,7 @@ cli_tool_result cli_tool_executor_impl::execute_search_replace(const cli_tool_ca
         return r;
     }
 
-    auto result = cli_tool_exec::search_replace(path, search, replace);
+    auto result = cli_tool_exec::search_replace(path, old_string, new_string, replace_all);
     result.tool_call_id = call.id;
     return result;
 }
@@ -1896,6 +2347,65 @@ namespace cli_tool_exec {
 // File search tools (from upstream llama.cpp)
 // ============================================================================
 
+// ============================================================================
+// Glob matching (from common/common.cpp — supports *, **, ?, [])
+// ============================================================================
+
+static bool glob_class_match(char c, const char * pattern, const char * class_end) {
+    bool negated = (*pattern == '!');
+    if (negated) pattern++;
+    bool matched = false;
+    while (pattern < class_end) {
+        if (pattern + 2 < class_end && pattern[1] == '-') {
+            if (c >= pattern[0] && c <= pattern[2]) { matched = true; break; }
+            pattern += 3;
+        } else {
+            if (c == *pattern) { matched = true; break; }
+            pattern++;
+        }
+    }
+    return negated ? !matched : matched;
+}
+
+static bool glob_match(const char * pattern, const char * str) {
+    if (*pattern == '\0') return *str == '\0';
+    if (pattern[0] == '*' && pattern[1] == '*') {
+        const char * p = pattern + 2;
+        if (glob_match(p, str)) return true;
+        if (*str != '\0') return glob_match(pattern, str + 1);
+        return false;
+    }
+    if (*pattern == '*') {
+        const char * p = pattern + 1;
+        for (; *str != '\0' && *str != '/'; str++) {
+            if (glob_match(p, str)) return true;
+        }
+        return glob_match(p, str);
+    }
+    if (*pattern == '?' && *str != '\0' && *str != '/') {
+        return glob_match(pattern + 1, str + 1);
+    }
+    if (*pattern == '[') {
+        const char * class_end = pattern + 1;
+        if (*class_end == ']' || *class_end == '-') class_end++;
+        while (*class_end != '\0' && *class_end != ']') class_end++;
+        if (*class_end == ']') {
+            if (*str == '\0') return false;
+            bool matched = glob_class_match(*str, pattern + 1, class_end);
+            return matched && glob_match(class_end + 1, str + 1);
+        } else {
+            if (*str == '[') return glob_match(pattern + 1, str + 1);
+            return false;
+        }
+    }
+    if (*pattern == *str) return glob_match(pattern + 1, str + 1);
+    return false;
+}
+
+static bool glob_match(const std::string & pattern, const std::string & str) {
+    return glob_match(pattern.c_str(), str.c_str());
+}
+
 cli_tool_result file_glob_search(const std::string& base,
                                   const std::string& include,
                                   const std::string& exclude,
@@ -1926,35 +2436,8 @@ cli_tool_result file_glob_search(const std::string& base,
         if (ec) continue;
         std::replace(rel.begin(), rel.end(), '\\', '/');
 
-        // Simple glob matching (supports * and **)
-        auto matches_glob = [](const std::string& pattern, const std::string& path) -> bool {
-            if (pattern == "**" || pattern.empty()) return true;
-
-            // Handle ** pattern
-            if (pattern.find("**") != std::string::npos) {
-                std::string ext = pattern;
-                size_t pos = ext.find("**");
-                ext.erase(pos, 2);
-                if (!ext.empty() && ext[0] == '/') ext.erase(0, 1);
-                if (!ext.empty()) {
-                    return path.size() >= ext.size() &&
-                           path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
-                }
-                return true;
-            }
-
-            // Simple * matching
-            if (pattern.find('*') != std::string::npos) {
-                std::regex re("^" + pattern + "$");
-                std::smatch match;
-                return std::regex_match(path, match, re);
-            }
-
-            return path == pattern;
-        };
-
-        if (!matches_glob(include, rel)) continue;
-        if (!exclude.empty() && matches_glob(exclude, rel)) continue;
+        if (!glob_match(include, rel)) continue;
+        if (!exclude.empty() && glob_match(exclude, rel)) continue;
 
         output_text << entry.path().string() << "\n";
         if (++count >= max_results) {
@@ -2023,19 +2506,8 @@ cli_tool_result grep_search(const std::string& path,
             if (ec) continue;
             std::replace(rel.begin(), rel.end(), '\\', '/');
 
-            // Simple glob matching for include/exclude
-            auto matches_glob = [](const std::string& pattern, const std::string& path) -> bool {
-                if (pattern == "**" || pattern.empty()) return true;
-                if (pattern.find('*') != std::string::npos) {
-                    std::regex re("^" + pattern + "$");
-                    std::smatch match;
-                    return std::regex_match(path, match, re);
-                }
-                return path == pattern;
-            };
-
-            if (!matches_glob(include, rel)) continue;
-            if (!exclude.empty() && matches_glob(exclude, rel)) continue;
+            if (!glob_match(include, rel)) continue;
+            if (!exclude.empty() && glob_match(exclude, rel)) continue;
 
             search_file(entry.path());
         }

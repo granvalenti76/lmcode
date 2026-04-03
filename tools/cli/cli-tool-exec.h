@@ -134,7 +134,7 @@ namespace cli_tool_exec {
     cli_tool_result verify_file(const std::string& path, const std::string& expected_hash);
 
     // Search and replace text in a file
-    cli_tool_result search_replace(const std::string& path, const std::string& search, const std::string& replace);
+    cli_tool_result search_replace(const std::string& path, const std::string& search, const std::string& replace, bool replace_all = false);
 
     // Get line numbers for a file (formatted with line numbers)
     cli_tool_result get_line_numbers(const std::string& path);

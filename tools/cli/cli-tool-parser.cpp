@@ -58,7 +58,7 @@ std::vector<cli_tool_call> parse_tool_calls(
         while (std::regex_search(search_start, content.cend(), match, array_start_regex)) {
             size_t pos = std::distance(content.cbegin(), search_start) + match.position();
 
-            // Extract array
+            // Extract array with brace-depth tracking (string-aware)
             int depth = 0;
             bool in_string = false;
             bool escape_next = false;
@@ -120,7 +120,7 @@ std::vector<cli_tool_call> parse_tool_calls(
         while (std::regex_search(search_start, content.cend(), match, obj_start_regex)) {
             size_t pos = std::distance(content.cbegin(), search_start) + match.position();
 
-            // Extract object
+            // Extract object with brace-depth tracking (string-aware)
             int depth = 0;
             bool in_string = false;
             bool escape_next = false;
@@ -334,14 +334,27 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "- `end_line`: 0-indexed, exclusive\n\n";
 
     oss << "### Text-Based Editing\n\n";
-    oss << "**`search_replace`** — Search for text and replace it (more robust than line numbers):\n\n";
-    oss << "**How it works:** Provide a unique block of text to search for, and the replacement text.\n";
-    oss << "The search text must match EXACTLY (including whitespace and newlines).\n\n";
-    oss << "Example:\n";
+    oss << "**`search_replace`** — Search for text and replace it. Supports fuzzy matching for whitespace, indentation, and escape differences:\n\n";
+    oss << "**How it works:** Provide the exact text to replace (`oldString`) and the new text (`newString`).\n";
+    oss << "The tool tries 7 matching strategies — from exact match to fuzzy block-anchor matching.\n\n";
+    oss << "**Parameters:**\n";
+    oss << "- `path`: Absolute path to the file\n";
+    oss << "- `oldString`: The text to replace (must match file content, but whitespace/indentation differences are handled automatically)\n";
+    oss << "- `newString`: The replacement text\n";
+    oss << "- `replaceAll` (optional): Replace ALL occurrences of oldString (default: false). Useful for renaming variables.\n\n";
+    oss << "**Example — single replacement:**\n";
     oss << "```json\n";
-    oss << R"({"name": "search_replace", "arguments": {"path": "main.cpp", "search": "int x = 0;", "replace": "int x = 42; // updated"}})" << "\n";
+    oss << R"({"name": "search_replace", "arguments": {"path": "/Users/me/project/main.cpp", "oldString": "int x = 0;", "newString": "int x = 42; // updated"}})" << "\n";
     oss << "```\n\n";
-    oss << "**Tip:** Include enough context in the search string to make it unique (3-5 lines usually works).\n\n";
+    oss << "**Example — replace all occurrences:**\n";
+    oss << "```json\n";
+    oss << R"({"name": "search_replace", "arguments": {"path": "/Users/me/project/main.cpp", "oldString": "oldVar", "newString": "newVar", "replaceAll": true}})" << "\n";
+    oss << "```\n\n";
+    oss << "**Tips:**\n";
+    oss << "- Include 3-5 lines of context to make the match unique\n";
+    oss << "- The tool handles whitespace, indentation, and escaped character differences automatically\n";
+    oss << "- If the match isn't unique, the tool will tell you — add more context\n";
+    oss << "- Use `get_line_numbers` or `read_file` first to see the exact content\n\n";
 
     // --- Concrete examples with realistic values ---
     oss << "## Examples\n\n";
@@ -366,9 +379,9 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "User: Fix the bug in line 42\n";
     oss << "Assistant:\n";
     oss << "```json\n";
-    oss << R"({"name": "search_replace", "arguments": {"path": "main.swift", "search": "let count = array.count\nif count > 0 {", "replace": "let count = array.count\nif count >= 0 {"}})" << "\n";
+    oss << R"({"name": "search_replace", "arguments": {"path": "main.swift", "oldString": "let count = array.count\nif count > 0 {", "newString": "let count = array.count\nif count >= 0 {"}})" << "\n";
     oss << "```\n";
-    oss << "[tool result: Replaced 2 lines with 2 lines in main.swift]\n";
+    oss << "[tool result: Replaced 2 lines with 2 lines]\n";
     oss << "Assistant: Fixed the comparison operator.\n\n";
 
     oss << "User: Add a new function at line 10\n";
@@ -442,6 +455,7 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "- ⚠️ **CRITICAL:** Each `append_file` chunk must be 20-50 lines (~1-2 KB). Use `\\n` (escaped) to separate lines. Hard limits: 200 lines / 8 KB.\n";
     oss << "- Do NOT put an entire large file into a single `append_file` — it will be REJECTED. Split into chunks.\n";
     oss << "- **Editing files:** Use `insert_line`/`replace_range`/`delete_lines` when you know line numbers. Use `search_replace` when you don't.\n";
+    oss << "- **`search_replace`** uses `oldString`/`newString` (not `search`/`replace`). Set `replaceAll: true` to rename across the whole file.\n";
     oss << "- The `shell` tool does NOT support: >, >>, <<, |, `, $(), ${}. Use only simple commands.\n";
 
     return oss.str();
