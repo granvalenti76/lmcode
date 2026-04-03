@@ -27,7 +27,6 @@ static const char* COLOR_GRAY       = "\033[90m";
 static const char* COLOR_RED        = "\033[91m";
 static const char* COLOR_GREEN      = "\033[92m";
 static const char* COLOR_YELLOW     = "\033[93m";
-static const char* COLOR_BLUE       = "\033[94m";
 static const char* COLOR_CYAN       = "\033[96m";
 static const char* COLOR_BOLD       = "\033[1m";
 static const char* COLOR_DIM        = "\033[2m";
@@ -178,7 +177,101 @@ static std::atomic<bool> g_tui_broken{false};
 
 // Typing indicator state
 static bool g_is_typing = false;
-static int  g_typing_spinner = 0;
+
+// ── Apple HIG: Advanced Animation State ────────────────────────────
+static int g_animation_frame = 0;
+static std::chrono::steady_clock::time_point g_last_animation_time = std::chrono::steady_clock::now();
+static bool g_show_cursor = true;
+
+// ── Braille spinner (smooth animation) ──────────────────────────────
+static const char* SPINNER_FRAMES[] = {
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"
+};
+static const int SPINNER_FRAMES_COUNT = 10;
+
+// ── Status indicators ──────────────────────────────────────────────
+enum Status { STATUS_IDLE, STATUS_STREAMING, STATUS_WARNING, STATUS_ERROR };
+
+// ── Get current status based on state ──────────────────────────────
+static Status get_current_status() {
+    if (g_tui_broken) return STATUS_ERROR;
+    if (g_is_typing) return STATUS_STREAMING;
+    return STATUS_IDLE;
+}
+
+// ── Get animation frame ────────────────────────────────────────────
+static int get_animation_frame() {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - g_last_animation_time).count();
+
+    if (elapsed > 80) {  // Update every 80ms for smooth animation
+        g_animation_frame = (g_animation_frame + 1) % SPINNER_FRAMES_COUNT;
+        g_last_animation_time = now;
+    }
+
+    return g_animation_frame;
+}
+
+// ── Get status indicator with animation ────────────────────────────
+static const char* get_status_indicator() {
+    Status status = get_current_status();
+
+    switch (status) {
+        case STATUS_STREAMING:
+            return SPINNER_FRAMES[get_animation_frame()];
+        case STATUS_WARNING:
+            return "⚠";
+        case STATUS_ERROR:
+            return "✗";
+        case STATUS_IDLE:
+        default:
+            return "◯";
+    }
+}
+
+// ── Get status color based on state ────────────────────────────────
+static const char* get_status_color() {
+    Status status = get_current_status();
+
+    switch (status) {
+        case STATUS_STREAMING:
+            return COLOR_CYAN;
+        case STATUS_WARNING:
+            return COLOR_YELLOW;
+        case STATUS_ERROR:
+            return COLOR_RED;
+        case STATUS_IDLE:
+        default:
+            return COLOR_GRAY;
+    }
+}
+
+// ── Smooth blinking cursor ────────────────────────────────────────
+static bool should_show_cursor() {
+    static auto last_blink = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - last_blink).count();
+
+    if (elapsed > 500) {  // Blink every 500ms
+        g_show_cursor = !g_show_cursor;
+        last_blink = now;
+    }
+
+    return g_show_cursor;
+}
+
+// ── Draw elegant divider ─────────────────────────────────────────
+static void draw_divider_elegant(int width) {
+    printf("%s", COLOR_GRAY);
+    for (int i = 0; i < width; i++) {
+        if (i > 0 && i % 8 == 0) printf("┈");
+        else printf("─");
+    }
+    printf("%s", COLOR_RESET);
+    fflush(stdout);
+}
 
 // ─────────────────────────────────────────────────────────────
 // Terminal helpers
@@ -204,18 +297,6 @@ static void move_cursor(int row, int col) {
 
 static void clear_to_end() {
     printf("\033[K");
-}
-
-// FIX: always end the separator with COLOR_RESET so color never leaks out
-static void draw_separator() {
-    int width = get_term_width();
-    printf("%s", COLOR_GRAY);
-    for (int i = 0; i < width; i++) {
-        if (i > 0 && i % 8 == 0) printf("┈");
-        else printf("─");
-    }
-    printf("%s", COLOR_RESET);
-    fflush(stdout);   // flush immediately so partial draws don't leave stale color
 }
 
 static void handle_resize(int /*signum*/) {
@@ -670,9 +751,8 @@ void render() {
         int term_width  = get_term_width();
 
         // Sanity check: terminal too small
-        if (term_height < 10 || term_width < 20) return;
-
-        (void)term_width;
+        if (term_height < 10) return;
+        if (term_width < 20) term_width = 80;
 
         // ── Collect lines with viewport scroll ─────────────────────
         auto all_lines = g_output_buffer.get_visible_lines(0);
@@ -684,8 +764,8 @@ void render() {
         }
         int total_lines = (int)all_lines.size();
 
-        // 4 fixed UI rows: separator, input, separator, stats
-        int ui_lines   = 4;
+        // 5 UI rows: separator, input, separator, stats (+ 1 safety margin)
+        int ui_lines   = 5;
         int max_output = term_height - ui_lines;
         if (max_output < 1) max_output = 1;
 
@@ -693,16 +773,13 @@ void render() {
         int scroll_start = total_lines - max_output - g_scroll_offset;
         if (scroll_start < 0) scroll_start = 0;
 
-        // Dirty region tracking
-        size_t current_line_count = all_lines.size();
-        (void)current_line_count;  // Used for future optimization
-        g_last_line_count = current_line_count;
+        g_last_line_count = all_lines.size();
 
         // ── Clear & redraw ─────────────────────────────────────────
         printf("%s%s", COLOR_RESET, MOVE_HOME);
         fflush(stdout);
 
-        // Expand logical lines → wrapped screen-lines
+        // Expand logical lines → wrapped screen-lines with CURRENT term_width
         std::vector<std::string> screen_lines;
         screen_lines.reserve(std::min((size_t)500, (size_t)total_lines));
         for (int i = scroll_start; i < total_lines && i < scroll_start + max_output; i++) {
@@ -729,54 +806,66 @@ void render() {
             clear_to_end();
         }
 
-        // ── UI bar (always redraw for cursor position) ─────────────
+        // ════════════════════════════════════════════════════════════
+        // ║              INPUT AREA - ENHANCED STYLE                 ║
+        // ════════════════════════════════════════════════════════════
+
+        // ── TOP DIVIDER ────────────────────────────────────────────
         move_cursor(term_height - 3, 1);
         clear_to_end();
-        draw_separator();
+        draw_divider_elegant(term_width);
 
+        // ── INPUT LINE ─────────────────────────────────────────────
         move_cursor(term_height - 2, 1);
         clear_to_end();
-        // Styled input prompt with cyan color
+
+        // Animated status indicator
+        printf("%s%s%s ", get_status_color(), get_status_indicator(), COLOR_RESET);
+
+        // Input prompt with accent
         printf("%s%s❯%s %s%s", COLOR_CYAN, COLOR_BOLD, COLOR_RESET, COLOR_BOLD, g_input_buffer.c_str());
         printf("%s", COLOR_RESET);
-        // Position cursor correctly (accounting for "❯ " prefix = 2 chars)
-        move_cursor(term_height - 2, 3 + (int)g_cursor_pos);
 
+        // Smooth blinking cursor
+        if (should_show_cursor()) {
+            printf("%s█%s", COLOR_CYAN, COLOR_RESET);
+        } else {
+            printf("%s▏%s", COLOR_GRAY, COLOR_RESET);
+        }
+
+        // ── BOTTOM DIVIDER ─────────────────────────────────────────
         move_cursor(term_height - 1, 1);
         clear_to_end();
-        draw_separator();
+        draw_divider_elegant(term_width);
 
+        // ── STATS LINE ─────────────────────────────────────────────
         move_cursor(term_height, 1);
         clear_to_end();
 
-        // Stats line with typing indicator
-        if (g_is_typing) {
-            g_typing_spinner = (g_typing_spinner + 1) % 4;
-            const char* spinner_chars[] = {"⠋", "⠙", "⠹", "⠸"};
-            printf("%s%s Generating%s", COLOR_CYAN, spinner_chars[g_typing_spinner], COLOR_RESET);
-            if (!g_stats_line.empty()) {
-                printf("  %s%s%s", COLOR_DIM, g_stats_line.c_str(), COLOR_RESET);
-            }
-        } else if (!g_stats_line.empty()) {
-            printf("%s%s%s", COLOR_DIM, g_stats_line.c_str(), COLOR_RESET);
-        }
+        if (!g_stats_line.empty()) {
+            printf("  %s%s%s", COLOR_GRAY, g_stats_line.c_str(), COLOR_RESET);
 
-        // Show scroll indicator if scrolled back
-        if (g_scroll_offset > 0) {
-            int scroll_pct = total_lines > 0 ? (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
-            // Fancy scroll bar
-            int bar_width = 8;
-            int filled = (scroll_pct * bar_width) / 100;
-            printf(" %s[", COLOR_CYAN);
-            for (int i = 0; i < bar_width; i++) {
-                if (i < filled) printf("█");
-                else printf("░");
+            // Scroll indicator if scrolled back
+            if (g_scroll_offset > 0) {
+                int scroll_pct = total_lines > 0 ?
+                    (100 * (total_lines - g_scroll_offset)) / total_lines : 100;
+                int bar_width = 8;
+                int filled = (scroll_pct * bar_width) / 100;
+                printf(" %s[", COLOR_CYAN);
+                for (int i = 0; i < bar_width; i++) {
+                    if (i < filled) printf("█");
+                    else printf("░");
+                }
+                printf(" %d%%]%s", scroll_pct, COLOR_RESET);
             }
-            printf(" %d%%]%s", scroll_pct, COLOR_RESET);
+        } else {
+            // Idle state
+            printf("  %s✓ Ready%s", COLOR_GRAY, COLOR_RESET);
         }
 
         fflush(stdout);
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         g_tui_broken = true;
         fprintf(stderr, "[TUI Error] %s\n", e.what());
     }
@@ -797,9 +886,10 @@ void set_stats_line(const char* text) {
     if (!g_enabled || !g_initialized) return;
     g_stats_line = text ? text : "";
     int term_height = get_term_height();
+    int term_width = get_term_width();
     move_cursor(term_height - 1, 1);
     clear_to_end();
-    draw_separator();
+    draw_divider_elegant(term_width);
     move_cursor(term_height, 1);
     clear_to_end();
     if (!g_stats_line.empty())

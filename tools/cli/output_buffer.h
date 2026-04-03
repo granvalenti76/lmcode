@@ -45,7 +45,7 @@ public:
 
     // Bounded buffer limits
     static constexpr size_t MAX_BUFFER_LINES = 5000;
-    static constexpr size_t MAX_LINE_LENGTH = 8192;
+    static constexpr size_t MAX_LINE_LENGTH = 16384;  // Increased from 8192 for long lines
 
 private:
     mutable std::mutex mutex_;
