@@ -35,32 +35,6 @@ static const char* COLOR_RESET      = "\033[0m";
 // ─────────────────────────────────────────────────────────────
 
 // Returns the visible (printed) length of a string, skipping ANSI escapes.
-static int visible_len(const std::string& s) {
-    int len = 0;
-    bool in_esc = false;
-    for (size_t i = 0; i < s.size(); ) {
-        unsigned char c = (unsigned char)s[i];
-        if (in_esc) {
-            // ESC sequences end at a letter (@ through ~)
-            if (c >= 0x40 && c <= 0x7E) in_esc = false;
-            i++;
-        } else if (c == 0x1B) {
-            in_esc = true;
-            i++;
-        } else if (c >= 0x80) {
-            // UTF-8 multi-byte: count as 1 visible char
-            if      ((c & 0xF0) == 0xF0) i += 4;
-            else if ((c & 0xE0) == 0xE0) i += 3;
-            else if ((c & 0xC0) == 0xC0) i += 2;
-            else                          i += 1;
-            len++;
-        } else {
-            i++;
-            len++;
-        }
-    }
-    return len;
-}
 
 // Split a single logical line into screen-width chunks for rendering.
 // Preserves ANSI codes (they don't count toward width).
@@ -706,8 +680,9 @@ void render() {
 
         // ── FIXED: Calculate max_output correctly ────────────
         int UI_ROWS = 4;  // separator + input + separator + stats
-        int max_output = term_height - UI_ROWS - 1;  // -1 for safety
-        if (max_output < 5) max_output = 5;
+        int max_output = term_height - UI_ROWS;  // -1 for safety
+        if (max_output < 3) max_output = 3;
+        if (max_output > term_height - 2) max_output = term_height - 2;
 
         // Apply scroll offset
         int scroll_start = total_lines - max_output - g_scroll_offset;
@@ -717,7 +692,8 @@ void render() {
 
         // ── FIXED: Render output without complex wrapping ────
         int row = 1;
-        for (int i = scroll_start; i < total_lines && row <= max_output; i++, row++) {
+        int line_rendered = 0;
+        for (int i = scroll_start; i < total_lines && line_rendered  <= max_output; i++, line_rendered++) {
             move_cursor(row, 1);
             clear_to_end();
             std::string line = all_lines[i];
@@ -725,6 +701,8 @@ void render() {
                 line = colorize_line(line);
             }
             printf("%s%s", COLOR_RESET, line.c_str());
+
+            row++;
         }
 
         // Clear remaining output rows
