@@ -644,8 +644,11 @@ std::string read_input() {
             break;
         }
         if (c == 12) { g_output_buffer.clear(); g_scroll_offset = 0; render(); continue; } // Ctrl-L clear
-        if (c >= 32 && c < 127) {
-            // Limit input buffer to 4096 chars
+        // ✅ FIX: Accept UTF-8 multi-byte (è, à, ù, etc.)
+        unsigned char uc = static_cast<unsigned char>(c);
+        if ((uc >= 32 && uc <= 126) ||      // ASCII printable
+            (uc >= 192 && uc <= 244) ||     // UTF-8 start bytes
+            (uc >= 128 && uc < 192)) {      // UTF-8 continuation
             if (g_input_buffer.size() >= 4096) continue;
             g_input_buffer.insert(g_cursor_pos, 1, c);
             g_cursor_pos++;
@@ -679,10 +682,9 @@ void render() {
         int total_lines = (int)all_lines.size();
 
         // ── FIXED: Calculate max_output correctly ────────────
-        int UI_ROWS = 4;  // separator + input + separator + stats
-        int max_output = term_height - UI_ROWS;  // -1 for safety
-        if (max_output < 3) max_output = 3;
-        if (max_output > term_height - 2) max_output = term_height - 2;
+        int UI_ROWS = 5;  // separator + input + separator + stats
+        int max_output = std::max(3, term_height - UI_ROWS);
+        if (max_output > term_height - 3) max_output = term_height - 3;
 
         // Apply scroll offset
         int scroll_start = total_lines - max_output - g_scroll_offset;
@@ -795,7 +797,7 @@ void scroll_output(int lines) {
     auto all_lines = g_output_buffer.get_visible_lines(0);
     int total = (int)all_lines.size();
     int term_height = get_term_height();
-    int max_output = term_height - 4;  // UI rows
+    int max_output = term_height - 5;  // UI rows
     if (max_output < 1) max_output = 1;
 
     g_scroll_offset += lines;
