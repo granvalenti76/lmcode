@@ -151,7 +151,62 @@ static const char* get_status_indicator() {
             return "◯";
     }
 }
-
+// ── UTF-8 aware line wrapping ─────────────────────────────
+static std::vector<std::string> wrap_line_utf8(const std::string& line, int width) {
+    std::vector<std::string> result;
+    if (width < 10) width = 10;
+    
+    std::string current;
+    int visible_width = 0;  // Length without ANSI codes
+    bool in_ansi = false;
+    
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        
+        // Detect ANSI escape sequence start
+        if (c == '\033' && i + 1 < line.size() && line[i+1] == '[') {
+            in_ansi = true;
+            current += c;
+            continue;
+        }
+        
+        // Detect ANSI escape sequence end
+        if (in_ansi && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~')) {
+            in_ansi = false;
+            current += c;
+            continue;
+        }
+        
+        if (in_ansi) {
+            current += c;
+            continue;
+        }
+        
+        // Regular character
+        // Check if UTF-8 continuation byte
+        unsigned char uc = static_cast<unsigned char>(c);
+        bool is_continuation = (uc >= 0x80 && uc < 0xC0);
+        
+        if (!is_continuation) {
+            visible_width++;
+        }
+        
+        current += c;
+        
+        // Wrap if visible width exceeded
+        if (visible_width >= width) {
+            result.push_back(current + COLOR_RESET);
+            current.clear();
+            visible_width = 0;
+        }
+    }
+    
+    if (!current.empty()) {
+        result.push_back(current + COLOR_RESET);
+    }
+    
+    return result.empty() ? std::vector<std::string>{"."} : result;
+}
 // ── Get status color based on state ────────────────────────────────
 static const char* get_status_color() {
     Status status = get_current_status();
@@ -694,17 +749,20 @@ void render() {
 
         // ── FIXED: Render output without complex wrapping ────
         int row = 1;
-        int line_rendered = 0;
-        for (int i = scroll_start; i < total_lines && line_rendered  <= max_output; i++, line_rendered++) {
-            move_cursor(row, 1);
-            clear_to_end();
-            std::string line = all_lines[i];
-            if (line.find("\033[") == std::string::npos) {
-                line = colorize_line(line);
+        int lines_drawn = 0;
+        for (int i = scroll_start; i < total_lines && lines_drawn < max_output; i++) {
+            auto wrapped = wrap_line_utf8(all_lines[i], term_width - 2);  // -2 margin
+            
+            for (const auto& wrapped_line : wrapped) {
+                if (lines_drawn >= max_output) break;
+                
+                move_cursor(row, 1);
+                clear_to_end();
+                printf("%s%s", COLOR_RESET, wrapped_line.c_str());
+                
+                row++;
+                lines_drawn++;
             }
-            printf("%s%s", COLOR_RESET, line.c_str());
-
-            row++;
         }
 
         // Clear remaining output rows
