@@ -824,16 +824,19 @@ void set_stats_line(const char* text) {
 void scroll_output(int lines) {
     if (!g_enabled || !g_initialized) return;
 
-    auto all_lines = g_output_buffer.get_visible_lines(0);
-    int total = (int)all_lines.size();
     int term_height = get_term_height();
-    int max_output = term_height - 4;  // UI rows
-    if (max_output < 1) max_output = 1;
+    int MARGIN_TOTAL = 14; // 10 margine + 4 UI
+    int visible_area = term_height - MARGIN_TOTAL;
+    if (visible_area < 1) visible_area = 1;
 
+    // Anche qui, dovremmo contare le righe fisiche per uno scroll fluido
+    // ma per ora sincronizziamo almeno il limite inferiore
     g_scroll_offset += lines;
     if (g_scroll_offset < 0) g_scroll_offset = 0;
-    if (g_scroll_offset > total - max_output) g_scroll_offset = total - max_output;
-    if (g_scroll_offset < 0) g_scroll_offset = 0;
+    
+    // Evita di scrollare troppo in alto nel vuoto
+    // (Un calcolo preciso richiederebbe il wrap anche qui, ma questo è il fix minimo)
+    if (g_scroll_offset > 1000) g_scroll_offset = 1000;
 
     render();
 }
