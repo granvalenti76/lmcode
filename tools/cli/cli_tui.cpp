@@ -715,105 +715,77 @@ std::string read_input() {
 
 void render() {
     if (!g_enabled || !g_initialized) return;
-
     g_render_frame_counter++;
 
     try {
         int term_height = get_term_height();
         int term_width  = get_term_width();
 
-        // Sanity check: terminal too small
-        if (term_height < 10) return;
-        if (term_width < 20) term_width = 80;
+        // 1. DEFINIZIONE SPAZI
+        int UI_SIZE = 4;      // Le 4 righe fisse in fondo (divisori, input, stats)
+        int MARGIN = 10;      // Il tuo margine di sicurezza
+        int RESERVED = UI_SIZE + MARGIN;
+        int MAX_TEXT_ROW = term_height - RESERVED; // L'ultima riga utile per il testo
 
-        // ── Collect lines with viewport scroll ─────────────────────
-        auto all_lines = g_output_buffer.get_visible_lines(0);
+        if (MAX_TEXT_ROW < 1) MAX_TEXT_ROW = 1; // Protezione per finestre piccole
+
+        // 2. PREPARAZIONE TESTO (Calcoliamo le righe REALI/FISICHE)
+        auto logical_lines = g_output_buffer.get_visible_lines(0);
         {
             std::lock_guard<std::mutex> lock(g_stream_mutex);
             if (g_streaming && !g_stream_current_line.empty()) {
-                all_lines.push_back(g_stream_current_line);
-            }
-        }
-        int total_lines = (int)all_lines.size();
-
-        // ── FIXED: Calculate max_output correctly ────────────
-        int UI_ROWS = 5;  // separator + input + separator + stats
-        int max_output = std::max(3, term_height - UI_ROWS);
-        if (max_output > term_height - 3) max_output = term_height - 3;
-
-        // Apply scroll offset
-        int scroll_start = total_lines - max_output - g_scroll_offset;
-        if (scroll_start < 0) scroll_start = 0;
-
-        g_last_line_count = all_lines.size();
-
-        // ── FIXED: Render output without complex wrapping ────
-        int row = 1;
-        int lines_drawn = 0;
-        for (int i = scroll_start; i < total_lines && lines_drawn < max_output; i++) {
-            auto wrapped = wrap_line_utf8(all_lines[i], term_width - 2);  // -2 margin
-            
-            for (const auto& wrapped_line : wrapped) {
-                if (lines_drawn >= max_output) break;
-                
-                move_cursor(row, 1);
-                clear_to_end();
-                printf("%s%s", COLOR_RESET, wrapped_line.c_str());
-                
-                row++;
-                lines_drawn++;
+                logical_lines.push_back(g_stream_current_line);
             }
         }
 
-        // Clear remaining output rows
-        for (; row <= max_output; row++) {
-            move_cursor(row, 1);
+        std::vector<std::string> physical_rows;
+        for (const auto& line : logical_lines) {
+            auto wrapped = wrap_line_utf8(line, term_width - 2);
+            for (const auto& w : wrapped) {
+                physical_rows.push_back(w);
+            }
+        }
+
+        // 3. CALCOLO DELLO SCROLL (Basato su righe fisiche, non logiche!)
+        int total_phys = (int)physical_rows.size();
+        int start_idx = total_phys - MAX_TEXT_ROW - g_scroll_offset;
+        if (start_idx < 0) start_idx = 0;
+
+        // 4. STAMPA AREA TESTO
+        int current_row = 1;
+        for (int i = start_idx; i < total_phys && current_row <= MAX_TEXT_ROW; i++) {
+            move_cursor(current_row, 1);
+            clear_to_end();
+            printf("%s%s", COLOR_RESET, physical_rows[i].c_str());
+            current_row++;
+        }
+
+        // 5. PULIZIA DEL MARGINE (Importante per evitare "cose strane")
+        // Puliamo tutto dallo spazio sotto il testo fino a dove inizia l'interfaccia
+        int ui_start_row = term_height - 3;
+        for (int r = current_row; r < ui_start_row; r++) {
+            move_cursor(r, 1);
             clear_to_end();
         }
 
-        // ════════════════════════════════════════════════════════════
-        // ║              INPUT AREA - ENHANCED STYLE                 ║
-        // ════════════════════════════════════════════════════════════
-
-        // ── TOP DIVIDER ────────────────────────────────────────────
+        // 6. DISEGNO INTERFACCIA (Posizioni fisse)
         move_cursor(term_height - 3, 1);
-        clear_to_end();
         draw_divider_elegant(term_width);
 
-        // ── INPUT LINE ─────────────────────────────────────────────
         move_cursor(term_height - 2, 1);
         clear_to_end();
-
-        // Animated status indicator
         printf("%s%s%s ", get_status_color(), get_status_indicator(), COLOR_RESET);
-
-        // Input prompt with accent
         printf("%s%s❯%s %s%s", COLOR_CYAN, COLOR_BOLD, COLOR_RESET, COLOR_BOLD, g_input_buffer.c_str());
-        printf("%s", COLOR_RESET);
+        if (should_show_cursor()) printf("%s█%s", COLOR_CYAN, COLOR_RESET);
+        else printf("%s▏%s", COLOR_GRAY, COLOR_RESET);
 
-        // Smooth blinking cursor
-        if (should_show_cursor()) {
-            printf("%s█%s", COLOR_CYAN, COLOR_RESET);
-        } else {
-            printf("%s▏%s", COLOR_GRAY, COLOR_RESET);
-        }
-
-        // ── BOTTOM DIVIDER ─────────────────────────────────────────
         move_cursor(term_height - 1, 1);
-        clear_to_end();
         draw_divider_elegant(term_width);
 
-        // ── STATS/TOOL STATUS LINE ───────────────────────────
         move_cursor(term_height, 1);
         clear_to_end();
-
-        if (!g_tool_status.empty()) {
-            printf("  %s[⚙️  %s]%s", COLOR_CYAN, g_tool_status.c_str(), COLOR_RESET);
-        } else if (!g_stats_line.empty()) {
-            printf("  %s%s%s", COLOR_GRAY, g_stats_line.c_str(), COLOR_RESET);
-        } else {
-            printf("  %s✓ Ready%s", COLOR_GRAY, COLOR_RESET);
-        }
+        if (!g_tool_status.empty()) printf("  %s[⚙️  %s]%s", COLOR_CYAN, g_tool_status.c_str(), COLOR_RESET);
+        else printf("  %s%s%s", COLOR_GRAY, g_stats_line.empty() ? "✓ Ready" : g_stats_line.c_str(), COLOR_RESET);
 
         fflush(stdout);
     }
@@ -855,7 +827,7 @@ void scroll_output(int lines) {
     auto all_lines = g_output_buffer.get_visible_lines(0);
     int total = (int)all_lines.size();
     int term_height = get_term_height();
-    int max_output = term_height - 5;  // UI rows
+    int max_output = term_height - 4;  // UI rows
     if (max_output < 1) max_output = 1;
 
     g_scroll_offset += lines;
