@@ -10,6 +10,13 @@
 
 using json = nlohmann::ordered_json;
 
+// Tools mode enum
+enum common_tools_mode {
+    COMMON_TOOLS_MODE_EMPTY   = 0,  // No tools available
+    COMMON_TOOLS_MODE_MINIMAL = 1,  // Only essential tools (read_file, write_file, list_dir, shell)
+    COMMON_TOOLS_MODE_ALL     = 2,  // All tools (default)
+};
+
 // Tool definition (for registry - keeps auto_execute flag for confirmation logic)
 struct cli_tool {
     std::string name;
@@ -64,4 +71,7 @@ private:
 namespace cli_tools {
     std::vector<cli_tool> get_default_tools();
     std::vector<cli_tool> get_swift_tools();
+
+    // Get tools based on mode
+    std::vector<cli_tool> get_tools_for_mode(common_tools_mode mode);
 }

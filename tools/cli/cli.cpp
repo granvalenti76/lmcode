@@ -90,6 +90,7 @@ struct cli_context {
     std::string reasoning_budget_message;
     common_reasoning_format reasoning_format;
     bool enable_thinking = true;
+    std::string user_system_prompt;  // Saved user system prompt for dynamic updates
 
     // Tool support
     cli_tool_registry tool_registry;
@@ -123,7 +124,7 @@ struct cli_context {
 
     std::atomic<bool> loading_show;
 
-    cli_context(const common_params & params) {
+    cli_context(const common_params & params, common_tools_mode mode = COMMON_TOOLS_MODE_ALL) {
         defaults.sampling    = params.sampling;
         defaults.speculative = params.speculative;
         defaults.n_keep      = params.n_keep;
@@ -140,21 +141,51 @@ struct cli_context {
         reasoning_budget = params.reasoning_budget;
         reasoning_budget_message = params.reasoning_budget_message;
         enable_thinking = params.enable_reasoning != 0;
+        user_system_prompt = params.system_prompt;
 
         // Initialize tool executor with security config
         cli_tool_security_config security_config;
         tool_executor = create_tool_executor(security_config);
 
-        // Load default tools
-        for (const auto& tool : cli_tools::get_default_tools()) {
-            tool_registry.add_tool(tool);
-        }
-        for (const auto& tool : cli_tools::get_swift_tools()) {
+        // Load tools based on mode (--tools flag)
+        for (const auto& tool : cli_tools::get_tools_for_mode(mode)) {
             tool_registry.add_tool(tool);
         }
 
         // Initialize stats
         stats.max_tool_calls = tool_call_limit;
+    }
+
+    // Update system prompt when tools are added/removed dynamically
+    void update_tool_system_prompt() {
+        // Build the new system message content
+        std::string system_content = user_system_prompt;
+        if (!tool_registry.get_tools().empty()) {
+            if (!system_content.empty()) {
+                system_content += "\n\n";
+            }
+            system_content += cli_tool_parser::format_tool_system_message(tool_registry.get_tools());
+        }
+
+        // Find the system message in the messages array
+        for (size_t i = 0; i < messages.size(); i++) {
+            if (messages[i]["role"] == "system") {
+                // Update existing system message
+                messages[i]["content"] = system_content;
+                return;
+            }
+        }
+
+        // No system message found, create one at the beginning
+        if (!system_content.empty()) {
+            json new_msg = {{"role", "system"}, {"content", system_content}};
+            json new_messages = json::array();
+            new_messages.push_back(new_msg);
+            for (const auto& msg : messages) {
+                new_messages.push_back(msg);
+            }
+            messages = std::move(new_messages);
+        }
     }
 
     // Update context size stats
@@ -919,6 +950,31 @@ int main(int argc, char ** argv) {
     common_params params;
     params.verbosity = LOG_LEVEL_ERROR;
 
+    // Parse --tools flag before common_params_parse
+    common_tools_mode tools_mode = COMMON_TOOLS_MODE_ALL;  // Default: all tools
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--tools" && i + 1 < argc) {
+            std::string value = argv[i + 1];
+            if (value == "empty") {
+                tools_mode = COMMON_TOOLS_MODE_EMPTY;
+            } else if (value == "minimal") {
+                tools_mode = COMMON_TOOLS_MODE_MINIMAL;
+            } else if (value == "all") {
+                tools_mode = COMMON_TOOLS_MODE_ALL;
+            } else {
+                console::error("Invalid --tools value: %s (use: empty, minimal, all)\n", value.c_str());
+                return 1;
+            }
+            // Remove --tools and its value from argv so common_params_parse doesn't see it
+            for (int j = i; j < argc - 2; j++) {
+                argv[j] = argv[j + 2];
+            }
+            argc -= 2;
+            break;
+        }
+    }
+
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CLI)) {
         return 1;
     }
@@ -930,7 +986,7 @@ int main(int argc, char ** argv) {
 
     common_init();
 
-    cli_context ctx_cli(params);
+    cli_context ctx_cli(params, tools_mode);
 
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -996,7 +1052,7 @@ int main(int argc, char ** argv) {
     if (inf.has_inp_audio) modalities += ", audio";
 
     auto add_system_prompt = [&]() {
-        std::string system_content = params.system_prompt;
+        std::string system_content = ctx_cli.user_system_prompt;
 
         // Add tool definitions to system message
         if (!ctx_cli.tool_registry.get_tools().empty()) {
@@ -1026,6 +1082,10 @@ int main(int argc, char ** argv) {
         if (!params.system_prompt.empty()) {
             cli_tui::print("system     : custom prompt\n");
         }
+        cli_tui::print("tools      : %s\n",
+            tools_mode == COMMON_TOOLS_MODE_EMPTY ? "empty (use /tool to add)" :
+            tools_mode == COMMON_TOOLS_MODE_MINIMAL ? "minimal (read/write/list/shell)" :
+            "all (use /tool to remove)");
         cli_tui::print("\n");
         cli_tui::print("commands:\n");
         cli_tui::print("  /exit, Ctrl+C   exit\n");
@@ -1049,6 +1109,9 @@ int main(int argc, char ** argv) {
         }
         cli_tui::print("  /read <file>    add text file\n");
         cli_tui::print("\n");
+        cli_tui::print("CLI flags:\n");
+        cli_tui::print("  --tools <mode>  set initial tools: empty, minimal, all (default: all)\n");
+        cli_tui::print("\n");
         cli_tui::end_bulk_print();  // Render everything at once
     } else {
         console::log("\n");
@@ -1059,6 +1122,10 @@ int main(int argc, char ** argv) {
         if (!params.system_prompt.empty()) {
             console::log("system     : custom prompt\n");
         }
+        console::log("tools      : %s\n",
+            tools_mode == COMMON_TOOLS_MODE_EMPTY ? "empty (use /tool to add)" :
+            tools_mode == COMMON_TOOLS_MODE_MINIMAL ? "minimal (read/write/list/shell)" :
+            "all (use /tool to remove)");
         console::log("\n");
         console::log("commands:\n");
         console::log("  /exit, Ctrl+C   exit\n");
@@ -1081,6 +1148,9 @@ int main(int argc, char ** argv) {
             console::log("  /audio <file>   add audio\n");
         }
         console::log("  /read <file>    add text file\n");
+        console::log("\n");
+        console::log("CLI flags:\n");
+        console::log("  --tools <mode>  set initial tools: empty, minimal, all (default: all)\n");
         console::log("\n");
     }
 
@@ -1275,6 +1345,8 @@ int main(int argc, char ** argv) {
             std::string cmd = string_strip(buffer.substr(6));
             if (cmd == "clear") {
                 ctx_cli.tool_registry.clear_tools();
+                // Update system prompt with new tool list
+                ctx_cli.update_tool_system_prompt();
                 if (cli_tui::is_enabled()) {
                     cli_tui::print("All tools removed.\n");
                 } else {
@@ -1283,6 +1355,8 @@ int main(int argc, char ** argv) {
             } else if (string_starts_with(cmd, "remove ")) {
                 std::string name = string_strip(cmd.substr(7));
                 ctx_cli.tool_registry.remove_tool(name);
+                // Update system prompt with new tool list
+                ctx_cli.update_tool_system_prompt();
                 if (cli_tui::is_enabled()) {
                     cli_tui::print("Tool '%s' removed.\n", name.c_str());
                 } else {
@@ -1306,6 +1380,10 @@ int main(int argc, char ** argv) {
                         found = true;
                         break;
                     }
+                }
+                // Update system prompt with new tool list
+                if (found) {
+                    ctx_cli.update_tool_system_prompt();
                 }
                 if (cli_tui::is_enabled()) {
                     cli_tui::print(found ? "Tool '%s' added.\n" : "Tool '%s' not found.\n", name.c_str());

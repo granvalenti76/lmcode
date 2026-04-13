@@ -195,9 +195,10 @@ std::string format_tool_result(const cli_tool_result& result) {
 
 std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     std::ostringstream oss;
+    bool compact_mode = tools.size() <= 4;
 
     // --- Tool list ---
-    oss << "You are a helpful assistant with access to tools for file and shell operations.\n\n";
+    oss << "You are a helpful assistant with access to tools.\n\n";
     oss << "## Available Tools\n\n";
     for (const auto& tool : tools) {
         // Pretty-print parameters: parse JSON schema and show required fields clearly
@@ -238,6 +239,13 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "When you need to use a tool, output a JSON object on its own line:\n\n";
     oss << R"({"name": "tool_name", "arguments": {"param": "value"}})" << "\n\n";
     oss << "The tool will execute and you will receive the result. Then respond normally in plain text.\n\n";
+
+    // In compact mode, skip the detailed examples to save context
+    if (compact_mode) {
+        return oss.str();
+    }
+
+    // --- Full mode: detailed instructions (only when many tools are loaded) ---
 
     // --- Shell tool usage ---
     oss << "## Using the Shell Tool\n\n";

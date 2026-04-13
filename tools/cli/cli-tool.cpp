@@ -162,4 +162,39 @@ std::vector<cli_tool> get_swift_tools() {
     };
 }
 
+std::vector<cli_tool> get_tools_for_mode(common_tools_mode mode) {
+    std::vector<cli_tool> tools;
+
+    switch (mode) {
+        case COMMON_TOOLS_MODE_EMPTY:
+            // No tools
+            break;
+
+        case COMMON_TOOLS_MODE_MINIMAL:
+            // Only essential tools
+            for (const auto& tool : get_default_tools()) {
+                if (tool.name == "read_file" ||
+                    tool.name == "write_file" ||
+                    tool.name == "list_dir" ||
+                    tool.name == "shell") {
+                    tools.push_back(tool);
+                }
+            }
+            break;
+
+        case COMMON_TOOLS_MODE_ALL:
+        default:
+            // All tools
+            for (const auto& tool : get_default_tools()) {
+                tools.push_back(tool);
+            }
+            for (const auto& tool : get_swift_tools()) {
+                tools.push_back(tool);
+            }
+            break;
+    }
+
+    return tools;
+}
+
 }  // namespace cli_tools
