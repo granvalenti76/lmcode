@@ -26,6 +26,7 @@
 #include <thread>
 #include <signal.h>
 #include <unordered_map>
+#include <unistd.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -65,8 +66,19 @@ static void signal_handler(int) {
 #endif
 
 // ============================================================================
-// CLI Context with tool support
+// Helpers
 // ============================================================================
+
+static std::string read_confirmation_line() {
+    std::string line;
+    char c;
+    // Legge direttamente dal kernel buffer per evitare conflitti con std::cin
+    while (read(STDIN_FILENO, &c, 1) > 0) {
+        if (c == '\n') break;
+        line += c;
+    }
+    return line;
+}
 
 struct cli_context {
     server_context ctx_server;

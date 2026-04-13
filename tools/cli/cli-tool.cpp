@@ -77,6 +77,7 @@ static const char* VERIFY_FILE_SCHEMA = R"json({"type":"object","properties":{"p
 
 static const char* SEARCH_REPLACE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the file to modify"},"oldString":{"type":"string","description":"The exact text to replace (must match file contents exactly, including whitespace and indentation)"},"newString":{"type":"string","description":"The new text to replace oldString with"},"replaceAll":{"type":"boolean","description":"Replace all occurrences of oldString (default: false)"},"search":{"type":"string","description":"Alias for oldString (deprecated)"},"replace":{"type":"string","description":"Alias for newString (deprecated)"}},"required":["path","oldString","newString"]})json";
 static const char* GET_LINE_NUMBERS_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"}},"required":["path"]})json";
+static const char* DIFF_FILE_SCHEMA = R"json({"type":"object","properties":{"path1":{"type":"string","description":"Path to the first file"},"path2":{"type":"string","description":"Path to the second file"}},"required":["path1","path2"]})json";
 static const char* SEARCH_REGEX_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"pattern":{"type":"string","description":"Regex pattern to search for"},"replace":{"type":"string","description":"Text to replace matches with"}},"required":["path","pattern","replace"]})json";
 
 // --- File search tools (from upstream llama.cpp) ---
@@ -130,6 +131,7 @@ std::vector<cli_tool> get_default_tools() {
         // --- Surgical edits on existing files ---
         {"search_replace", "Search for text in a file and replace it. Supports fuzzy matching for whitespace, indentation, and escape differences. Use oldString/newString parameters.", SEARCH_REPLACE_SCHEMA, false},
         {"get_line_numbers", "Read file with line numbers prefixed (useful for finding exact positions)", GET_LINE_NUMBERS_SCHEMA, true},
+        {"get_file_diff", "Get difference between two files in unified diff format", DIFF_FILE_SCHEMA, true},
         {"search_regex", "Search and replace using regex patterns (more powerful than exact match)", SEARCH_REGEX_SCHEMA, false},
         {"list_dir", "List contents of a directory", LIST_DIR_SCHEMA, true},
         {"shell", "Execute a shell command (always requires confirmation)", SHELL_SCHEMA, false},
