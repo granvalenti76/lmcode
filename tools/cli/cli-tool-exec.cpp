@@ -15,6 +15,8 @@
 #include <tuple>       // std::tuple
 #include <algorithm>   // std::sort, std::unique, std::count
 #include <climits>     // INT_MAX
+#include <iomanip>     // std::setw, std::setfill
+#include <ctime>       // std::time
 
 using json = nlohmann::ordered_json;
 
@@ -40,6 +42,33 @@ static std::string shell_quote(const std::string& arg) {
 // ============================================================================
 
 namespace cli_tool_exec {
+
+// Helper: calculate simple hash of content for verification
+static std::string calculate_hash(const std::string& content) {
+    // Simple djb2 hash - fast and good enough for verification
+    unsigned long hash = 5381;
+    for (char c : content) {
+        hash = ((hash << 5) + hash) + static_cast<unsigned char>(c);
+    }
+    return std::to_string(hash);
+}
+
+// Helper: calculate byte offset for a given line number (0-indexed)
+static size_t line_offset(const std::string& content, int line_idx) {
+    if (line_idx <= 0) return 0;
+    size_t offset = 0;
+    int current_line = 0;
+    while (current_line < line_idx && offset < content.size()) {
+        size_t next_nl = content.find('\n', offset);
+        if (next_nl == std::string::npos) {
+            offset = content.size();
+            break;
+        }
+        offset = next_nl + 1;
+        current_line++;
+    }
+    return offset;
+}
 
 static std::string read_file_to_string(const std::string& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -210,15 +239,111 @@ cli_tool_result read_file_content(const std::string& path) {
             return result;
         }
 
-        result.content = read_file_to_string(path);
+        std::string content = read_file_to_string(path);
+        size_t total_lines = std::count(content.begin(), content.end(), '\n') + 1;
+        std::string hash = calculate_hash(content);
+        
+        // Build structured result with metadata
+        std::ostringstream oss;
+        oss << "path=" << path << "\n";
+        oss << "total_lines=" << total_lines << "\n";
+        oss << "file_size=" << content.size() << " bytes\n";
+        oss << "file_hash=" << hash << "\n";
+        oss << "---\n";
+        oss << content;
+        
+        result.content = oss.str();
+        result.exit_code = 0;
+        result.success = true;
+
+        // Log for debugging
+        fprintf(stderr, "[read_file] path=%s, lines=%zu, size=%zu, success=%d\n",
+                path.c_str(), total_lines, content.size(), result.success ? 1 : 0);
+    } catch (const std::exception& e) {
+        result.error = std::string("Error reading file: ") + e.what();
+        result.exit_code = 1;
+        result.success = false;
+    }
+
+    return result;
+}
+
+// Read file content with line range (1-indexed, inclusive)
+// Returns metadata alongside content for efficient navigation
+cli_tool_result read_file_range(const std::string& path, int start_line, int end_line) {
+    cli_tool_result result;
+
+    try {
+        if (!fs::exists(path)) {
+            result.error = "File does not exist: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+        if (!fs::is_regular_file(path)) {
+            result.error = "Not a regular file: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        std::string content = read_file_to_string(path);
+        
+        // Count total lines
+        size_t total_newlines = std::count(content.begin(), content.end(), '\n');
+        size_t total_lines = total_newlines + 1;
+        
+        // Validate line range
+        if (start_line < 1) {
+            start_line = 1;
+        }
+        if (end_line < 0 || static_cast<size_t>(end_line) > total_lines) {
+            end_line = static_cast<int>(total_lines);
+        }
+        if (start_line > end_line) {
+            result.error = "Invalid range: start_line (" + std::to_string(start_line) + 
+                          ") > end_line (" + std::to_string(end_line) + ")";
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+        
+        // Calculate byte offsets
+        size_t start_offset = line_offset(content, start_line - 1);  // Convert to 0-indexed
+        size_t end_offset;
+        
+        if (end_line >= static_cast<int>(total_lines)) {
+            end_offset = content.size();
+        } else {
+            end_offset = line_offset(content, end_line);
+        }
+        
+        // Extract the range
+        std::string range_content = content.substr(start_offset, end_offset - start_offset);
+        size_t lines_returned = std::count(range_content.begin(), range_content.end(), '\n') + 1;
+        std::string hash = calculate_hash(content);
+        
+        // Build structured result with metadata
+        std::ostringstream oss;
+        oss << "path=" << path << "\n";
+        oss << "total_lines=" << total_lines << "\n";
+        oss << "lines_returned=" << lines_returned << "\n";
+        oss << "start_line=" << start_line << "\n";
+        oss << "end_line=" << end_line << "\n";
+        oss << "file_size=" << content.size() << " bytes\n";
+        oss << "file_hash=" << hash << "\n";
+        oss << "---\n";
+        oss << range_content;
+        
+        result.content = oss.str();
         result.exit_code = 0;
         result.success = true;
         
-        // Log for debugging
-        fprintf(stderr, "[read_file] path=%s, size=%zu, success=%d\n", 
-                path.c_str(), result.content.size(), result.success ? 1 : 0);
+        fprintf(stderr, "[read_file_range] path=%s, lines=%d-%d/%zu, size=%zu, success=%d\n",
+                path.c_str(), start_line, end_line, total_lines, range_content.size(), result.success ? 1 : 0);
+                
     } catch (const std::exception& e) {
-        result.error = std::string("Error reading file: ") + e.what();
+        result.error = std::string("Error reading file range: ") + e.what();
         result.exit_code = 1;
         result.success = false;
     }
@@ -277,16 +402,6 @@ cli_tool_result start_file(const std::string& path) {
     }
 
     return result;
-}
-
-// Helper: calculate simple hash of content for verification
-static std::string calculate_hash(const std::string& content) {
-    // Simple djb2 hash - fast and good enough for verification
-    unsigned long hash = 5381;
-    for (char c : content) {
-        hash = ((hash << 5) + hash) + static_cast<unsigned char>(c);
-    }
-    return std::to_string(hash);
 }
 
 // Append content to a file (for chunked writing).
@@ -626,22 +741,6 @@ static std::vector<std::string> split_lines(const std::string& s) {
         lines.push_back(line);
     }
     return lines;
-}
-
-static size_t line_offset(const std::string& content, int line_idx) {
-    if (line_idx <= 0) return 0;
-    size_t offset = 0;
-    int current_line = 0;
-    while (current_line < line_idx && offset < content.size()) {
-        size_t next_nl = content.find('\n', offset);
-        if (next_nl == std::string::npos) {
-            offset = content.size();
-            break;
-        }
-        offset = next_nl + 1;
-        current_line++;
-    }
-    return offset;
 }
 
 // Extract substring from start_line to end_line (inclusive)
@@ -1016,7 +1115,67 @@ cli_tool_result search_replace(const std::string& path, const std::string& searc
 
 // Get line numbers: read file and return content with line numbers prefixed
 cli_tool_result get_line_numbers(const std::string& path) {
-    // ... (implementation remains same)
+    cli_tool_result result;
+
+    try {
+        if (!fs::exists(path)) {
+            result.error = "File does not exist: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+        if (!fs::is_regular_file(path)) {
+            result.error = "Not a regular file: " + path;
+            result.exit_code = 1;
+            result.success = false;
+            return result;
+        }
+
+        std::string content = read_file_to_string(path);
+        std::istringstream iss(content);
+        std::string line;
+        std::ostringstream oss;
+        int line_num = 1;
+        
+        while (std::getline(iss, line)) {
+            oss << std::setw(6) << std::right << line_num << " | " << line << "\n";
+            line_num++;
+        }
+        
+        // Handle trailing newline (don't add extra line number)
+        if (!content.empty() && content.back() == '\n') {
+            // File ends with newline, which is normal
+        } else if (!content.empty()) {
+            // File doesn't end with newline - we already added the last line above
+        }
+        
+        size_t total_lines = line_num - 1;
+        std::string hash = calculate_hash(content);
+        
+        // Add metadata header
+        std::string numbered_content = oss.str();
+        std::ostringstream header;
+        header << "path=" << path << "\n";
+        header << "total_lines=" << total_lines << "\n";
+        header << "file_size=" << content.size() << " bytes\n";
+        header << "file_hash=" << hash << "\n";
+        header << "---\n";
+        header << numbered_content;
+        
+        result.content = header.str();
+        result.exit_code = 0;
+        result.success = true;
+        
+        fprintf(stderr, "[get_line_numbers] path=%s, lines=%zu, size=%zu, success=%d\n",
+                path.c_str(), total_lines, numbered_content.size(), result.success ? 1 : 0);
+                
+    } catch (const std::exception& e) {
+        result.error = std::string("Error in get_line_numbers: ") + e.what();
+        result.exit_code = 1;
+        result.success = false;
+    }
+
+    return result;
 }
 
 cli_tool_result get_file_diff(const std::string& path1, const std::string& path2) {
@@ -1305,7 +1464,7 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
         }
 
         std::string file_content = read_file_to_string(path);
-        
+
         // Count lines to validate range
         int total_lines = 0;
         for (char c : file_content) if (c == '\n') total_lines++;
@@ -1329,7 +1488,7 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
 
         std::string new_content = file_content;
         new_content.erase(start_off, end_off - start_off);
-        
+
         write_string_to_file_atomically(path, new_content);
 
         result.content = "Deleted lines " + std::to_string(start_line) + "-" +
@@ -1339,6 +1498,71 @@ cli_tool_result delete_lines(const std::string& path, int start_line, int end_li
         result.success = true;
     } catch (const std::exception& e) {
         result.error = std::string("Error deleting lines: ") + e.what();
+        result.exit_code = 1;
+    }
+
+    return result;
+}
+
+// Replace a range of lines with new content (direct line-based, no string matching)
+// This bypasses the smart replace engine and directly targets lines by number
+cli_tool_result replace_lines(const std::string& path, int start_line, int end_line, const std::string& content) {
+    cli_tool_result result;
+
+    try {
+        if (!fs::exists(path)) {
+            result.error = "File does not exist: " + path;
+            result.exit_code = 1;
+            return result;
+        }
+
+        std::string file_content = read_file_to_string(path);
+
+        // Count lines to validate range
+        int total_lines = 0;
+        for (char c : file_content) if (c == '\n') total_lines++;
+        if (!file_content.empty() && file_content.back() != '\n') total_lines++;
+
+        if (start_line < 0 || start_line >= total_lines) {
+            result.error = "Invalid start line: " + std::to_string(start_line) +
+                           " (must be 0-" + std::to_string(total_lines - 1) + ")";
+            result.exit_code = 1;
+            return result;
+        }
+        if (end_line < start_line || end_line > total_lines) {
+            result.error = "Invalid end line: " + std::to_string(end_line) +
+                           " (must be >= start_line and <= " + std::to_string(total_lines) + ")";
+            result.exit_code = 1;
+            return result;
+        }
+
+        size_t start_off = line_offset(file_content, start_line);
+        size_t end_off = line_offset(file_content, end_line);
+
+        std::string new_content = file_content;
+        
+        // Ensure replacement content ends with newline
+        std::string replacement = content;
+        if (!replacement.empty() && replacement.back() != '\n') {
+            replacement += "\n";
+        }
+
+        new_content.replace(start_off, end_off - start_off, replacement);
+
+        write_string_to_file_atomically(path, new_content);
+
+        size_t new_lines = std::count(new_content.begin(), new_content.end(), '\n') + 1;
+        std::string new_hash = calculate_hash(new_content);
+        
+        result.content = "Replaced lines " + std::to_string(start_line) + "-" + 
+                         std::to_string(end_line - 1) + " in " + path + "\n" +
+                         "new_total_lines=" + std::to_string(new_lines) + "\n" +
+                         "new_size=" + std::to_string(new_content.size()) + " bytes\n" +
+                         "new_hash=" + new_hash;
+        result.exit_code = 0;
+        result.success = true;
+    } catch (const std::exception& e) {
+        result.error = std::string("Error in replace_lines: ") + e.what();
         result.exit_code = 1;
     }
 
@@ -1411,7 +1635,8 @@ std::string cli_tool_executor_impl::get_safety_violation(const std::string& cmd)
 
 bool cli_tool_executor_impl::requires_confirmation(const cli_tool_call& call) const {
     // Read-only tools: no confirmation needed
-        if (call.name == "read_file" || call.name == "list_dir" ||
+        if (call.name == "read_file" || call.name == "read_file_range" ||
+            call.name == "list_dir" ||
             call.name == "touch_file" || call.name == "search_snippets" ||
             call.name == "file_glob_search" || call.name == "grep_search" ||
             call.name == "get_file_info" || call.name == "get_line_numbers" ||
@@ -1448,12 +1673,12 @@ bool cli_tool_executor_impl::requires_confirmation(const cli_tool_call& call) co
         return true;
     }
 
-    // write_file, swift_run, swift_package, insert_line, replace_range, delete_lines, load_snippet
+    // write_file, swift_run, swift_package, insert_line, replace_range, replace_lines, delete_lines, load_snippet
     // always need confirmation (they modify files)
     if (call.name == "write_file" || call.name == "swift_run" ||
         call.name == "swift_package" || call.name == "insert_line" ||
-        call.name == "replace_range" || call.name == "delete_lines" ||
-        call.name == "load_snippet") {
+        call.name == "replace_range" || call.name == "replace_lines" ||
+        call.name == "delete_lines" || call.name == "load_snippet") {
         return true;
     }
 
@@ -1481,6 +1706,7 @@ cli_tool_result cli_tool_executor_impl::execute(const cli_tool_call& call, bool 
 
     try {
         if      (call.name == "read_file")      result = execute_read_file(call);
+        else if (call.name == "read_file_range") result = execute_read_file_range(call);
         else if (call.name == "touch_file")     result = execute_touch_file(call);
         else if (call.name == "write_file")     result = execute_write_file(call);
         else if (call.name == "start_file")     result = execute_start_file(call);
@@ -1496,6 +1722,7 @@ cli_tool_result cli_tool_executor_impl::execute(const cli_tool_call& call, bool 
         else if (call.name == "shell")          result = execute_shell(call);
         else if (call.name == "insert_line")    result = execute_insert_line(call);
         else if (call.name == "replace_range")  result = execute_replace_range(call);
+        else if (call.name == "replace_lines")  result = execute_replace_lines(call);
         else if (call.name == "delete_lines")   result = execute_delete_lines(call);
         // File search tools (from upstream llama.cpp)
         else if (call.name == "file_glob_search") result = execute_file_glob_search(call);
@@ -1569,16 +1796,96 @@ cli_tool_result cli_tool_executor_impl::execute_read_file(const cli_tool_call& c
         r.error = "Missing required argument: path"; r.exit_code = -1;
         return r;
     }
-    
+
     // Security check: prevent reading files outside CWD
     if (!cli_tool_exec::is_in_cwd(path)) {
         cli_tool_result r; r.tool_call_id = call.id;
         r.error = "Security: Cannot read files outside current directory"; r.exit_code = -1;
         return r;
     }
-    
+
     auto result = cli_tool_exec::read_file_content(path);
     result.tool_call_id = call.id;
+    return result;
+}
+
+cli_tool_result cli_tool_executor_impl::execute_read_file_range(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string path = get_arg(args, "path");
+    int start_line = args.value("start_line", -1);
+    int end_line = args.value("end_line", -1);
+    
+    if (path.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: path"; r.exit_code = -1;
+        return r;
+    }
+    if (start_line < 1) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing or invalid required argument: start_line (must be >= 1)"; r.exit_code = -1;
+        return r;
+    }
+    if (end_line < start_line) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Invalid argument: end_line must be >= start_line"; r.exit_code = -1;
+        return r;
+    }
+
+    // Security check: prevent reading files outside CWD
+    if (!cli_tool_exec::is_in_cwd(path)) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Security: Cannot read files outside current directory"; r.exit_code = -1;
+        return r;
+    }
+
+    auto result = cli_tool_exec::read_file_range(path, start_line, end_line);
+    result.tool_call_id = call.id;
+    
+    // Track file session for drift detection
+    if (result.success) {
+        std::string canonical_path;
+        try {
+            canonical_path = fs::weakly_canonical(fs::absolute(path)).string();
+        } catch (...) {
+            canonical_path = path;
+        }
+        
+        // Parse metadata from result to update session
+        // Format: "path=...\ntotal_lines=...\nfile_hash=...\n---\n<content>"
+        auto separator_pos = result.content.find("\n---\n");
+        if (separator_pos != std::string::npos) {
+            std::string metadata = result.content.substr(0, separator_pos);
+            
+            cli_file_session session;
+            session.path = canonical_path;
+            session.last_access_time = std::time(nullptr);
+            
+            // Parse total_lines
+            auto lines_pos = metadata.find("total_lines=");
+            if (lines_pos != std::string::npos) {
+                auto end_pos = metadata.find("\n", lines_pos);
+                if (end_pos != std::string::npos) {
+                    std::string val = metadata.substr(lines_pos + 12, end_pos - lines_pos - 12);
+                    session.total_lines = std::stoull(val);
+                }
+            }
+            
+            // Parse file_hash
+            auto hash_pos = metadata.find("file_hash=");
+            if (hash_pos != std::string::npos) {
+                auto end_pos = metadata.find("\n", hash_pos);
+                if (end_pos != std::string::npos) {
+                    session.last_hash = metadata.substr(hash_pos + 10, end_pos - hash_pos - 10);
+                }
+            }
+            
+            session.last_read_start = start_line;
+            session.last_read_end = end_line;
+            
+            file_sessions_[canonical_path] = session;
+        }
+    }
+    
     return result;
 }
 
@@ -2008,6 +2315,85 @@ cli_tool_result cli_tool_executor_impl::execute_delete_lines(const cli_tool_call
 
     auto result = cli_tool_exec::delete_lines(path, start_line, end_line);
     result.tool_call_id = call.id;
+    return result;
+}
+
+cli_tool_result cli_tool_executor_impl::execute_replace_lines(const cli_tool_call& call) {
+    auto args = parse_args(call.arguments);
+    std::string path = get_arg(args, "path");
+    int start_line = args.value("start_line", -1);
+    int end_line = args.value("end_line", -1);
+    std::string content = get_arg(args, "content");
+
+    if (path.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: path"; r.exit_code = -1;
+        return r;
+    }
+    if (start_line < 0 || end_line < 0) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing or invalid required argument: start_line or end_line"; r.exit_code = -1;
+        return r;
+    }
+    if (content.empty()) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Missing required argument: content (use delete_lines to remove lines)"; r.exit_code = -1;
+        return r;
+    }
+
+    // Security check
+    if (!cli_tool_exec::is_in_cwd(path)) {
+        cli_tool_result r; r.tool_call_id = call.id;
+        r.error = "Security: Cannot modify files outside current directory"; r.exit_code = -1;
+        return r;
+    }
+
+    // Check for file drift before editing
+    std::string canonical_path;
+    try {
+        canonical_path = fs::weakly_canonical(fs::absolute(path)).string();
+    } catch (...) {
+        canonical_path = path;
+    }
+    
+    auto session_it = file_sessions_.find(canonical_path);
+    if (session_it != file_sessions_.end()) {
+        // File was previously read - check for drift
+        std::string current_hash;
+        try {
+            std::string file_content = cli_tool_exec::read_file_to_string(path);
+            // Calculate hash manually since calculate_hash is static
+            unsigned long hash = 5381;
+            for (char c : file_content) {
+                hash = ((hash << 5) + hash) + static_cast<unsigned char>(c);
+            }
+            current_hash = std::to_string(hash);
+        } catch (...) {
+            cli_tool_result r; r.tool_call_id = call.id;
+            r.error = "Cannot read file to check for drift: " + path; r.exit_code = -1;
+            return r;
+        }
+        
+        if (current_hash != session_it->second.last_hash) {
+            cli_tool_result r; r.tool_call_id = call.id;
+            r.error = "FILE DRIFT DETECTED: File has been modified since last read!\n"
+                      "Expected hash: " + session_it->second.last_hash + "\n"
+                      "Current hash:  " + current_hash + "\n"
+                      "Please re-read the file with read_file_range before editing.";
+            r.exit_code = -1;
+            r.success = false;
+            return r;
+        }
+    }
+
+    auto result = cli_tool_exec::replace_lines(path, start_line, end_line, content);
+    result.tool_call_id = call.id;
+    
+    // Invalidate session after successful edit
+    if (result.success) {
+        file_sessions_.erase(canonical_path);
+    }
+    
     return result;
 }
 

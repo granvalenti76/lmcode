@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <set>
+#include <map>
 
 // Security configuration for tool execution
 struct cli_tool_security_config {
@@ -54,6 +55,16 @@ struct cli_tool_security_config {
     std::string snippets_dir = "snippets";
 };
 
+// File session state for drift detection
+struct cli_file_session {
+    std::string path;
+    std::string last_hash;      // djb2 hash when last read
+    size_t total_lines;         // total lines in file when last read
+    size_t last_read_start;     // start line of last read_range
+    size_t last_read_end;       // end line of last read_range
+    int64_t last_access_time;   // timestamp of last access (for cleanup)
+};
+
 // Concrete tool executor implementation
 class cli_tool_executor_impl : public cli_tool_executor {
 public:
@@ -73,8 +84,12 @@ private:
     // Prevents append_file from writing to arbitrary existing files
     std::set<std::string> active_write_sessions_;
 
+    // Track file read sessions for drift detection
+    std::map<std::string, cli_file_session> file_sessions_;
+
     // Tool-specific executors
     cli_tool_result execute_read_file(const cli_tool_call& call);
+    cli_tool_result execute_read_file_range(const cli_tool_call& call);
     cli_tool_result execute_touch_file(const cli_tool_call& call);
     cli_tool_result execute_write_file(const cli_tool_call& call);
     cli_tool_result execute_start_file(const cli_tool_call& call);
@@ -90,6 +105,7 @@ private:
     cli_tool_result execute_shell(const cli_tool_call& call);
     cli_tool_result execute_insert_line(const cli_tool_call& call);
     cli_tool_result execute_replace_range(const cli_tool_call& call);
+    cli_tool_result execute_replace_lines(const cli_tool_call& call);
     cli_tool_result execute_delete_lines(const cli_tool_call& call);
     // File search tools (from upstream llama.cpp)
     cli_tool_result execute_file_glob_search(const cli_tool_call& call);
@@ -115,6 +131,9 @@ namespace cli_tool_exec {
 
     // Read file content
     cli_tool_result read_file_content(const std::string& path);
+
+    // Read file content with line range (1-indexed, inclusive)
+    cli_tool_result read_file_range(const std::string& path, int start_line, int end_line);
 
     // Write file content
     cli_tool_result write_file_content(const std::string& path, const std::string& content);
@@ -163,6 +182,9 @@ namespace cli_tool_exec {
 
     // Delete a range of lines from a file
     cli_tool_result delete_lines(const std::string& path, int start_line, int end_line);
+
+    // Replace a range of lines with new content (direct line-based, no string matching)
+    cli_tool_result replace_lines(const std::string& path, int start_line, int end_line, const std::string& content);
 
     // --- File search tools (from upstream llama.cpp) ---
 

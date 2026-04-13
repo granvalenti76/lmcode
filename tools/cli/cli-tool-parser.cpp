@@ -300,7 +300,35 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
 
     // --- Editing files with search_replace ---
     oss << "## Editing Existing Files\n\n";
+    oss << "### Workflow for Large Files\n\n";
+    oss << "**NEVER read an entire large file** — use targeted reads instead:\n\n";
+    oss << "1. **Find the location**: Use `grep_search(pattern)` to find line numbers\n";
+    oss << "2. **Read context**: Use `read_file_range(path, start_line, end_line)` to read 20-50 lines around the target\n";
+    oss << "3. **Edit precisely**: Use `replace_lines(path, start_line, end_line, new_content)` for direct line-based edits\n";
+    oss << "4. **Verify**: Use `swift_build` or `swift_format --lint` to confirm the edit produced valid code\n\n";
+    oss << "**Example workflow:**\n";
+    oss << "```\n";
+    oss << "1. grep_search(pattern: \"func old_handler\", path: \".\")\n";
+    oss << "   → Found at line 234 in src/handler.cpp\n";
+    oss << "2. read_file_range(path: \"src/handler.cpp\", start_line: 220, end_line: 260)\n";
+    oss << "   → Returns 40 lines with metadata (total_lines=847, hash=...)\n";
+    oss << "3. replace_lines(path: \"src/handler.cpp\", start_line: 230, end_line: 245, content: \"new code...\")\n";
+    oss << "   → Replaced lines 230-244 (0-indexed)\n";
+    oss << "4. swift_build()\n";
+    oss << "   → Build successful\n";
+    oss << "```\n\n";
+    oss << "**Benefits:**\n";
+    oss << "- Context efficient: only 20-50 lines in context vs entire file\n";
+    oss << "- Precise targeting: line numbers are unambiguous\n";
+    oss << "- Drift detection: system tracks file hash between read and edit\n";
+    oss << "- Faster: fewer tool calls needed\n\n";
+
     oss << "### When to Use Each Tool\n\n";
+    oss << "**Use `read_file_range` + `replace_lines` when:**\n";
+    oss << "- Working with large files (>200 lines)\n";
+    oss << "- You need precise control over what's in context\n";
+    oss << "- You want to avoid string matching issues\n";
+    oss << "- The file has multiple similar blocks that could confuse search_replace\n\n";
     oss << "**Use `insert_line`, `replace_range`, `delete_lines` when:**\n";
     oss << "- You know the exact line numbers (e.g., \"add at line 5\", \"delete lines 10-15\")\n";
     oss << "- You want to add/remove code without matching text\n";
@@ -310,6 +338,29 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "- You're replacing a unique text pattern\n";
     oss << "- The change is context-based, not position-based\n\n";
     oss << "**Use `get_line_numbers` to find line numbers before using surgical tools.**\n\n";
+
+    oss << "### Reading Files Efficiently\n\n";
+    oss << "**`read_file`** — Read entire file (use only for small files <200 lines):\n";
+    oss << "```json\n";
+    oss << R"({"name": "read_file", "arguments": {"path": "config.txt"}})" << "\n";
+    oss << "```\n";
+    oss << "Returns: metadata (total_lines, file_size, file_hash) + content\n\n";
+
+    oss << "**`read_file_range`** — Read specific line range (RECOMMENDED for large files):\n";
+    oss << "```json\n";
+    oss << R"({"name": "read_file_range", "arguments": {"path": "src/main.cpp", "start_line": 100, "end_line": 150}})" << "\n";
+    oss << "```\n";
+    oss << "- `start_line`: 1-indexed, inclusive\n";
+    oss << "- `end_line`: 1-indexed, inclusive (must be >= start_line)\n";
+    oss << "- Returns: metadata (total_lines, file_size, file_hash) + content for lines 100-150\n";
+    oss << "- System automatically tracks file hash for drift detection\n\n";
+
+    oss << "**`get_line_numbers`** — Read file with line numbers prefixed:\n";
+    oss << "```json\n";
+    oss << R"({"name": "get_line_numbers", "arguments": {"path": "src/main.cpp"}})" << "\n";
+    oss << "```\n";
+    oss << "- Useful for finding exact line numbers before surgical edits\n";
+    oss << "- Returns: formatted as \"   1 | import Foundation\\n   2 | ...\"\n\n";
 
     oss << "### Surgical Editing Tools (Line-Based)\n\n";
     oss << "**`insert_line`** — Insert a line at a specific position:\n";
@@ -332,6 +383,17 @@ std::string format_tool_system_message(const std::vector<cli_tool>& tools) {
     oss << "```\n";
     oss << "- `start_line`: 0-indexed, inclusive\n";
     oss << "- `end_line`: 0-indexed, exclusive\n\n";
+
+    oss << "**`replace_lines`** — Replace lines start_line to end_line with new content (direct line-based edit):\n";
+    oss << "```json\n";
+    oss << R"({"name": "replace_lines", "arguments": {"path": "main.cpp", "start_line": 10, "end_line": 15, "content": "new_line_1\\nnew_line_2\\nnew_line_3\"}})" << "\n";
+    oss << "```\n";
+    oss << "- `start_line`: 0-indexed, inclusive\n";
+    oss << "- `end_line`: 0-indexed, exclusive (like Python slicing)\n";
+    oss << "- `content`: new lines separated by `\\n` (escaped)\n";
+    oss << "- **IMPORTANT**: Requires confirmation - system checks for file drift before editing\n";
+    oss << "- If file was modified since last read, edit is BLOCKED to prevent corruption\n";
+    oss << "- After successful edit, file session is invalidated (must re-read to edit again)\n\n";
 
     oss << "### Text-Based Editing\n\n";
     oss << "**`search_replace`** — Search for text and replace it. Supports fuzzy matching for whitespace, indentation, and escape differences:\n\n";

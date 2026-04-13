@@ -63,6 +63,7 @@ namespace cli_tools {
 
 // JSON schema helpers (avoid raw string literal issues)
 static const char* READ_FILE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"}},"required":["path"]})json";
+static const char* READ_FILE_RANGE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"Start line number (1-indexed, inclusive)"},"end_line":{"type":"integer","description":"End line number (1-indexed, inclusive). Use -1 or omit for end of file"}},"required":["path","start_line","end_line"]})json";
 static const char* WRITE_FILE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"content":{"type":"string","description":"Content to write"}},"required":["path","content"]})json";
 static const char* TOUCH_FILE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to create"}},"required":["path"]})json";
 static const char* LIST_DIR_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the directory"}},"required":["path"]})json";
@@ -86,6 +87,7 @@ static const char* GREP_SEARCH_SCHEMA = R"json({"type":"object","properties":{"p
 
 static const char* INSERT_LINE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"line_number":{"type":"integer","description":"0-indexed line number where to insert (0 = beginning, n = end)"},"content":{"type":"string","description":"Line content to insert"}},"required":["path","line_number","content"]})json";
 static const char* REPLACE_RANGE_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"0-indexed start line (inclusive)"},"end_line":{"type":"integer","description":"0-indexed end line (exclusive)"},"content":{"type":"string","description":"New content to replace the range"}},"required":["path","start_line","end_line","content"]})json";
+static const char* REPLACE_LINES_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"0-indexed start line (inclusive)"},"end_line":{"type":"integer","description":"0-indexed end line (exclusive)"},"content":{"type":"string","description":"New content to replace the lines"}},"required":["path","start_line","end_line","content"]})json";
 static const char* DELETE_LINES_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file"},"start_line":{"type":"integer","description":"0-indexed start line (inclusive)"},"end_line":{"type":"integer","description":"0-indexed end line (exclusive)"}},"required":["path","start_line","end_line"]})json";
 
 static const char* SWIFT_BUILD_SCHEMA = R"json({"type":"object","properties":{"configuration":{"type":"string","enum":["debug","release"],"default":"debug"},"package_path":{"type":"string"}}})json";
@@ -117,6 +119,7 @@ static const char* LOAD_SNIPPET_SCHEMA = R"json({
 std::vector<cli_tool> get_default_tools() {
     return {
         {"read_file", "Read contents of a file", READ_FILE_SCHEMA, true},
+        {"read_file_range", "Read a specific line range from a file (efficient for large files). Returns metadata (total_lines, hash, size) plus content.", READ_FILE_RANGE_SCHEMA, true},
         {"touch_file", "Create an empty file (like touch command)", TOUCH_FILE_SCHEMA, true},
         {"write_file", "Write content to a file (asks confirmation if file exists)", WRITE_FILE_SCHEMA, false},
         // --- Chunked write chain: use for files that are too long for a single write_file ---
@@ -137,6 +140,7 @@ std::vector<cli_tool> get_default_tools() {
         {"shell", "Execute a shell command (always requires confirmation)", SHELL_SCHEMA, false},
         {"insert_line", "Insert a line at a specific position in a file", INSERT_LINE_SCHEMA, false},
         {"replace_range", "Replace a range of lines with new content", REPLACE_RANGE_SCHEMA, false},
+        {"replace_lines", "Replace lines start_line to end_line with new content (direct line-based edit, no string matching)", REPLACE_LINES_SCHEMA, false},
         {"delete_lines", "Delete a range of lines from a file", DELETE_LINES_SCHEMA, false},
         // --- File search tools (from upstream llama.cpp) ---
         {"file_glob_search", "Recursively search for files matching a glob pattern (e.g. **/*.cpp)", FILE_GLOB_SEARCH_SCHEMA, true},

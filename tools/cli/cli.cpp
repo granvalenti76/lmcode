@@ -800,7 +800,8 @@ struct cli_context {
         std::string safe_result = result;
 
         // Truncate very long tool results to prevent OOM
-        const size_t MAX_TOOL_RESULT = 8192;
+        // Increased to 16KB to accommodate file read ranges with metadata
+        const size_t MAX_TOOL_RESULT = 16384;  // 16KB (was 8KB)
         if (safe_result.size() > MAX_TOOL_RESULT) {
             safe_result = safe_result.substr(0, MAX_TOOL_RESULT) + "\n... [truncated]";
         }
