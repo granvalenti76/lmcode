@@ -24,6 +24,12 @@ struct cli_tool_security_config {
         "^pwd$", "^whoami$", "^uname$", "^date$",
         "^wc\\s.*", "^head\\s.*", "^tail\\s.*",
         "^which\\s.*", "^which$",  // which command to find executables
+        "^ps\\s.*", "^ps$", // ps
+        "^cat\\s.*", "^cat$", // cat
+        "^curl\\s.*", "^curl$",
+        "^diff\\s.*", "^diff$",
+        "^python[0-9.]*\\s.*", "^python[0-9.]*$",
+        "^py\\s.*", "^py$",
         "^\\./[a-zA-Z0-9_./-]+\\s.*", "^\\./[a-zA-Z0-9_./-]+$"  // local scripts: ./script.sh
     };
 
@@ -33,11 +39,9 @@ struct cli_tool_security_config {
     std::vector<std::string> shell_blacklist = {
         "rm\\s+-rf", "sudo", "su\\s", "chmod\\s+777",
         "dd\\s+", "mkfs", "mount\\s", "umount\\s",
-        "curl.*\\|.*sh", "wget.*\\|.*sh",
         ":(){:|:&};:", "fork bomb",
-        ">", ">>",  // Block output redirection (use write_file instead)
-        "<<",  // Block heredoc (use write_file instead)
-        "\\|",  // Block pipes (use separate commands)
+        // ">", ">>",  // Block output redirection (use write_file instead)
+        // "<<",  // Block heredoc (use write_file instead)
         "`", "$(", "${",  // Block command substitution
         "<(", "<"  // Block process substitution and input redirection
     };
