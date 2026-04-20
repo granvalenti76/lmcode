@@ -8,7 +8,7 @@ add_executable(${TARGET}
     cli_tui.cpp
     output_buffer.cpp
 )
-target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PRIVATE server-context llama-common llama ggml ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 include_directories(../server)
