@@ -43,7 +43,7 @@ struct cli_tool_security_config {
         // ">", ">>",  // Block output redirection (use write_file instead)
         // "<<",  // Block heredoc (use write_file instead)
         "`", "$(", "${",  // Block command substitution
-        "<(", "<"  // Block process substitution and input redirection
+        // "<(", "<"  // Block process substitution and input redirection
     };
 
     // Max output length (truncate longer outputs)
