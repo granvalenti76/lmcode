@@ -47,7 +47,7 @@ struct cli_tool_security_config {
     };
 
     // Max output length (truncate longer outputs)
-    size_t max_output_length = 4096;
+    size_t max_output_length = 8048;
 
     // Execution timeout in seconds
     int timeout_seconds = 30;

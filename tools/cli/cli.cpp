@@ -46,6 +46,45 @@ const char * LLAMA_ASCII_LOGO = R"(
 ╚══════╝╚═╝     ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 )";
 
+// Funzione per stampare logo ASCII con effetto arcobaleno
+// Funzione per stampare logo ASCII con effetto arcobaleno
+// Funzione per stampare logo ASCII con effetto arcobaleno (riga per riga)
+static void print_rainbow_ascii_art(const char * art) {
+    // Ho riordinato i colori per simulare meglio un arcobaleno reale
+    static const char * colors[] = {
+        "\033[31m",  // Red
+        "\033[33m",  // Yellow
+        "\033[32m",  // Green
+        "\033[36m",  // Cyan
+        "\033[34m",  // Blue
+        "\033[35m",  // Magenta
+    };
+    
+    // Calcoliamo il numero di colori disponibili
+    int num_colors = sizeof(colors) / sizeof(colors[0]);
+    int color_idx = 0;
+
+    // Imposta il colore della primissima riga
+    console::log("%s", colors[color_idx]);
+
+    for (const char *p = art; *p; ++p) {
+        if (*p == '\n') {
+            // Quando andiamo a capo, cambiamo colore
+            color_idx = (color_idx + 1) % num_colors;
+            
+            // Chiudiamo il colore precedente, andiamo a capo, e apriamo il nuovo colore
+            console::log("\033[0m\n%s", colors[color_idx]);
+            continue;
+        }
+        
+        // Stampa il carattere normalmente (prenderà il colore impostato a inizio riga)
+        console::log("%c", *p);
+    }
+    
+    // Reset finale per non colorare tutto il resto del terminale
+    console::log("\033[0m\n");
+}
+
 // Global debug mode flag for tool parser (atomic for thread safety)
 std::atomic<bool> g_tool_parser_debug{false};
 
@@ -1075,7 +1114,7 @@ int main(int argc, char ** argv) {
     if (cli_tui::is_enabled()) {
         cli_tui::begin_bulk_print();  // Suppress render during bulk print
         cli_tui::print("\n");
-        cli_tui::print("%s\n", LLAMA_ASCII_LOGO);
+        print_rainbow_ascii_art(LLAMA_ASCII_LOGO);
         cli_tui::print("build      : %s\n", inf.build_info.c_str());
         cli_tui::print("model      : %s\n", inf.model_name.c_str());
         cli_tui::print("modalities : %s\n", modalities.c_str());
@@ -1115,7 +1154,8 @@ int main(int argc, char ** argv) {
         cli_tui::end_bulk_print();  // Render everything at once
     } else {
         console::log("\n");
-        console::log("%s\n", LLAMA_ASCII_LOGO);
+        // console::log("%s\n", LLAMA_ASCII_LOGO);
+        print_rainbow_ascii_art(LLAMA_ASCII_LOGO);
         console::log("build      : %s\n", inf.build_info.c_str());
         console::log("model      : %s\n", inf.model_name.c_str());
         console::log("modalities : %s\n", modalities.c_str());
