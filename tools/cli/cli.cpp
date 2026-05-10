@@ -1,6 +1,7 @@
 #include "chat.h"
 #include "common.h"
 #include "arg.h"
+#include "fit.h"
 #include "console.h"
 
 #include "server-context.h"
@@ -177,8 +178,8 @@ struct cli_context {
         reasoning_format = params.reasoning_format;
 
         verbose_prompt = params.verbose_prompt;
-        reasoning_budget = params.reasoning_budget;
-        reasoning_budget_message = params.reasoning_budget_message;
+        reasoning_budget = params.sampling.reasoning_budget_tokens;
+        reasoning_budget_message = params.sampling.reasoning_budget_message;
         enable_thinking = params.enable_reasoning != 0;
         user_system_prompt = params.system_prompt;
 
@@ -1532,7 +1533,7 @@ end_chat_loop:
     inference_thread.join();
 
     common_log_set_verbosity_thold(LOG_LEVEL_INFO);
-    llama_memory_breakdown_print(ctx_cli.ctx_server.get_llama_context());
+    common_memory_breakdown_print(ctx_cli.ctx_server.get_llama_context());
 
     return 0;
 }

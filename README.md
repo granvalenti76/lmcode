@@ -110,18 +110,8 @@ New features will probably be added mostly through community contributions, if a
 Here is a typical run using LLaMA-7B:
 
 ```java
-<<<<<<< HEAD
-<<<<<<< HEAD
 make -j && ./main -m ./models/7B/ggml-model-q4_0.bin -t 8 -n 128
 I llama.cpp build info:
-=======
-make -j && ./main -m ../LLaMA-4bit/7B/ggml-model-q4_0.bin -p "Building a website can be done in 10 simple steps:" -t 8 -n 512
-I llama.cpp build info:
->>>>>>> b85028522 (Update README.md)
-=======
-make -j && ./main -m ./models/7B/ggml-model-q4_0.bin -p "Building a website can be done in 10 simple steps:" -t 8 -n 512
-I llama.cpp build info:
->>>>>>> 007a8f6f4 (Support all LLaMA models + change Q4_0 quantization storage)
 I UNAME_S:  Darwin
 I UNAME_P:  arm
 I UNAME_M:  arm64
