@@ -2,3 +2,4 @@
 # Git's pack-file delta compression still works (byte-level), but this prevents
 # git diff from printing the entire minified file on every change.
 tools/server/public/index.html -diff
+tools/cli/* merge=ours
