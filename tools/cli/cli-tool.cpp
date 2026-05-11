@@ -96,6 +96,53 @@ static const char* SWIFT_RUN_SCHEMA = R"json({"type":"object","properties":{"exe
 static const char* SWIFT_PACKAGE_SCHEMA = R"json({"type":"object","properties":{"command":{"type":"string","enum":["resolve","update","add","remove","edit","unedit","show-dependencies"]},"arguments":{"type":"array","items":{"type":"string"}}},"required":["command"]})json";
 static const char* SWIFT_FORMAT_SCHEMA = R"json({"type":"object","properties":{"path":{"type":"string"},"in_place":{"type":"boolean","default":false}},"required":["path"]})json";
 
+// --- Task management tools ---
+// decompose: break a complex task into smaller subtasks
+static const char* DECOMPOSE_SCHEMA = R"json({
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "description": "ID of the task to decompose (0 for new root task)"
+    },
+    "steps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of step descriptions to break the task into. Start with the most concrete step first. Each step should be actionable by itself."
+    }
+  },
+  "required": ["task_id", "steps"]
+})json";
+
+// list_tasks: show current task hierarchy and status
+static const char* LIST_TASKS_SCHEMA = R"json({
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "description": "Optional: show details for a specific task. Omit to show all tasks."
+    }
+  },
+  "required": []
+})json";
+
+// set_task_status: mark a task as done, in progress, or failed
+static const char* SET_TASK_STATUS_SCHEMA = R"json({
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "description": "ID of the task to update"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["TODO", "IN_PROGRESS", "DONE", "FAILED"],
+      "description": "New status for the task. Use DONE when you complete a step, FAILED if it cannot be done, IN_PROGRESS when you start working on it."
+    }
+  },
+  "required": ["task_id", "status"]
+})json";
+
 // --- Snippet tools ---
 // search_snippets: simple ls of ./snippets/ directory
 static const char* SEARCH_SNIPPETS_SCHEMA = R"json({"type":"object","properties":{},"required":[]})json";
@@ -148,7 +195,11 @@ std::vector<cli_tool> get_default_tools() {
         // --- Snippet library (./snippets/) ---
         // Workflow: search_snippets → load_snippet → search_replace / append_file to customise
         {"search_snippets", "List all snippets in ./snippets/ directory (simple ls)", SEARCH_SNIPPETS_SCHEMA, true},
-        {"load_snippet",    "Copy a snippet from ./snippets/<snippet_name> to ./<dest_name> in the working directory (model chooses dest name)", LOAD_SNIPPET_SCHEMA, false}
+        {"load_snippet",    "Copy a snippet from ./snippets/<snippet_name> to ./<dest_name> in the working directory (model chooses dest name)", LOAD_SNIPPET_SCHEMA, false},
+        // --- Task decomposition tools (always available) ---
+        {"decompose",       "Break a complex task into smaller, actionable subtasks. Call this when a task has multiple independent steps.", DECOMPOSE_SCHEMA, true},
+        {"list_tasks",      "Show the current task hierarchy and their statuses. Useful to see what still needs to be done.", LIST_TASKS_SCHEMA, true},
+        {"set_task_status", "Update the status of a task (DONE, FAILED, IN_PROGRESS). Call this when you complete or fail a subtask.", SET_TASK_STATUS_SCHEMA, true}
     };
 }
 
@@ -165,13 +216,25 @@ std::vector<cli_tool> get_swift_tools() {
 std::vector<cli_tool> get_tools_for_mode(common_tools_mode mode) {
     std::vector<cli_tool> tools;
 
+    // Task decomposition tools are always available (meta-tools)
+    auto add_task_tools = [&]() {
+        for (const auto& tool : get_default_tools()) {
+            if (tool.name == "decompose" ||
+                tool.name == "list_tasks" ||
+                tool.name == "set_task_status") {
+                tools.push_back(tool);
+            }
+        }
+    };
+
     switch (mode) {
         case COMMON_TOOLS_MODE_EMPTY:
-            // No tools
+            // Only task management tools
+            add_task_tools();
             break;
 
         case COMMON_TOOLS_MODE_MINIMAL:
-            // Only essential tools
+            // Essential tools + task management
             for (const auto& tool : get_default_tools()) {
                 if (tool.name == "read_file" ||
                     tool.name == "write_file" ||
@@ -180,6 +243,7 @@ std::vector<cli_tool> get_tools_for_mode(common_tools_mode mode) {
                     tools.push_back(tool);
                 }
             }
+            add_task_tools();
             break;
 
         case COMMON_TOOLS_MODE_ALL:

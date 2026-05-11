@@ -7,6 +7,7 @@ add_executable(${TARGET}
     cli-stats.cpp
     cli_tui.cpp
     output_buffer.cpp
+    task_manager.cpp
 )
 target_link_libraries(${TARGET} PRIVATE server-context llama-common llama ggml ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

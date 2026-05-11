@@ -14,6 +14,7 @@
 #include "cli-stats.h"
 #include "cli_tui.h"
 #include "output_buffer.h"
+#include "task_manager.h"
 
 #include <array>
 #include <atomic>
@@ -155,6 +156,10 @@ struct cli_context {
     // Debug mode
     bool debug_mode = false;
 
+    // Task decomposition
+    TaskManager task_manager;
+    bool task_progress_changed = false;  // Flag to trigger visual output
+
     // Accumulates fragments of a JSON tool call that was split across multiple
     // generation turns due to n_predict truncation.  Cleared as soon as the
     // closing delimiter is received and the full JSON is successfully parsed.
@@ -256,6 +261,157 @@ struct cli_context {
             console::log("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
             console::flush();
         }
+    }
+
+    // ================================================================
+    // Task decomposition helpers
+    // ================================================================
+
+    // Print task progress tree to CLI
+    void print_task_progress() {
+        if (task_manager.empty()) return;
+        std::string tree = task_manager.format_tree();
+        if (cli_tui::is_enabled()) {
+            cli_tui::print("%s", tree.c_str());
+        } else {
+            console::log("%s", tree.c_str());
+            console::flush();
+        }
+    }
+
+    // Inject task status into the system prompt
+    // This is called after every task mutation so the model sees current state
+    void update_task_system_prompt() {
+        std::string task_summary = task_manager.get_summary();
+        if (task_summary.empty()) return;
+
+        // Find and update the last system message with task info appended
+        // We look for a system message that already has task info
+        for (size_t i = 0; i < messages.size(); i++) {
+            if (messages[i]["role"] == "system") {
+                std::string content = messages[i]["content"];
+
+                // Remove any previous task progress section
+                size_t task_pos = content.find("\n[Task Progress]");
+                if (task_pos != std::string::npos) {
+                    content = content.substr(0, task_pos);
+                }
+
+                // Append fresh task progress
+                content += "\n\n" + task_summary;
+                messages[i]["content"] = content;
+                return;
+            }
+        }
+    }
+
+    // Handle task management tools (decompose, list_tasks, set_task_status)
+    // Returns true if the tool was handled as a task tool
+    bool handle_task_tool_call(const cli_tool_call& call, cli_tool_result& result) {
+        result.tool_call_id = call.id;
+        result.exit_code = 0;
+        result.success = true;
+
+        try {
+            auto args = json::parse(call.arguments);
+
+            if (call.name == "decompose") {
+                int task_id = args.value("task_id", 0);
+                auto steps = args["steps"].get<std::vector<std::string>>();
+
+                // If task_id is 0, create a new root task first
+                if (task_id == 0 || get_task(task_id) == nullptr) {
+                    if (steps.empty()) {
+                        result.content = "Error: steps array is empty";
+                        result.success = false;
+                        result.exit_code = -1;
+                        return true;
+                    }
+                    task_id = task_manager.create_task(steps[0]);
+                    steps.erase(steps.begin());
+                    if (steps.empty()) {
+                        result.content = "Created task #" + std::to_string(task_id) + ": " +
+                            (task_manager.get_task(task_id) ? task_manager.get_task(task_id)->description : "");
+                        result.success = true;
+                        task_progress_changed = true;
+                        return true;
+                    }
+                }
+
+                auto created_ids = task_manager.decompose_task(task_id, steps);
+
+                // Build result message
+                std::stringstream ss;
+                const Task* parent = task_manager.get_task(task_id);
+                ss << "Decomposed task #" << task_id
+                   << (parent ? " (" + parent->description + ")" : "")
+                   << " into " << created_ids.size() << " subtasks:\n";
+                for (size_t i = 0; i < created_ids.size(); i++) {
+                    const Task* t = task_manager.get_task(created_ids[i]);
+                    ss << "  " << (i+1) << ". [#" << created_ids[i] << "] "
+                       << (t ? t->description : "?") << "\n";
+                }
+                result.content = ss.str();
+                task_progress_changed = true;
+
+            } else if (call.name == "set_task_status") {
+                int task_id = args["task_id"];
+                std::string status_str = args["status"];
+
+                TaskStatus status;
+                if (status_str == "DONE") status = TaskStatus::DONE;
+                else if (status_str == "FAILED") status = TaskStatus::FAILED;
+                else if (status_str == "IN_PROGRESS") status = TaskStatus::IN_PROGRESS;
+                else if (status_str == "TODO") status = TaskStatus::TODO;
+                else {
+                    result.content = "Invalid status: " + status_str + ". Valid values: TODO, IN_PROGRESS, DONE, FAILED";
+                    result.success = false;
+                    result.exit_code = -1;
+                    return true;
+                }
+
+                const Task* task = task_manager.get_task(task_id);
+                if (!task) {
+                    result.content = "Task #" + std::to_string(task_id) + " not found.";
+                    result.success = false;
+                    result.exit_code = -1;
+                    return true;
+                }
+
+                task_manager.set_task_status(task_id, status);
+                result.content = "Task #" + std::to_string(task_id) + " (" + task->description + ") marked as " + status_str;
+                task_progress_changed = true;
+
+            } else if (call.name == "list_tasks") {
+                if (task_manager.empty()) {
+                    result.content = "No active tasks.";
+                } else if (args.contains("task_id")) {
+                    int task_id = args["task_id"];
+                    result.content = task_manager.format_task_detail(task_id);
+                } else {
+                    result.content = task_manager.format_tree();
+                }
+
+            } else {
+                return false; // Not a task tool
+            }
+
+        } catch (const json::parse_error& e) {
+            result.content = std::string("JSON parse error: ") + e.what();
+            result.success = false;
+            result.exit_code = -1;
+        } catch (const json::type_error& e) {
+            result.content = std::string("Invalid arguments: ") + e.what();
+            result.success = false;
+            result.exit_code = -1;
+        }
+
+        return true;
+    }
+
+    // Helper to get task by ID (uses task_manager)
+    const Task* get_task(int id) const {
+        return task_manager.get_task(id);
     }
 
     std::string generate_completion(result_timings & out_timings) {
@@ -726,6 +882,24 @@ struct cli_context {
             return;
         }
 
+        // Handle task management tools (decompose, list_tasks, set_task_status)
+        // These are handled locally, not by the executor
+        if (call.name == "decompose" || call.name == "set_task_status" || call.name == "list_tasks") {
+            cli_tool_result result;
+            bool handled = handle_task_tool_call(call, result);
+            if (handled) {
+                // Print task progress to CLI
+                if (task_progress_changed) {
+                    print_task_progress();
+                    update_task_system_prompt();
+                    task_progress_changed = false;
+                }
+                // Add result to messages
+                add_tool_result_to_messages(call.id, cli_tool_parser::format_tool_result(result));
+                return;
+            }
+        }
+
         // Cache DISABLED: always execute tool
         // std::string cache_key = make_cache_key(call);
         // if (use_tool_cache && call.name == "read_file") {
@@ -964,7 +1138,7 @@ struct cli_context {
 // Commands
 // ============================================================================
 
-static const std::array<const std::string, 15> cmds = {
+static const std::array<const std::string, 17> cmds = {
     "/audio ",
     "/auto ",
     "/cache",
@@ -979,6 +1153,8 @@ static const std::array<const std::string, 15> cmds = {
     "/thinking",
     "/tool ",
     "/tools",
+    "/task",
+    "/tasks",
     "/help",
 };
 
@@ -1140,6 +1316,8 @@ int main(int argc, char ** argv) {
         cli_tui::print("  /tui [on|off]   toggle TUI input mode (default: on)\n");
         cli_tui::print("  /tools          list available tools\n");
         cli_tui::print("  /tool <cmd>     tool management (add/remove/clear)\n");
+        cli_tui::print("  /tasks          show task decomposition progress\n");
+        cli_tui::print("  /task <cmd>     task management (create/clear)\n");
         cli_tui::print("  /help           show this help\n");
         if (inf.has_inp_image) {
             cli_tui::print("  /image <file>   add image\n");
@@ -1181,6 +1359,8 @@ int main(int argc, char ** argv) {
         console::log("  /tui [on|off]   toggle TUI input mode (default: on)\n");
         console::log("  /tools          list available tools\n");
         console::log("  /tool <cmd>     tool management (add/remove/clear)\n");
+        console::log("  /tasks          show task decomposition progress\n");
+        console::log("  /task <cmd>     task management (create/clear)\n");
         console::log("  /help           show this help\n");
         if (inf.has_inp_image) {
             console::log("  /image <file>   add image\n");
@@ -1286,11 +1466,52 @@ int main(int argc, char ** argv) {
                 console::log("Chat cleared.\n");
             }
             continue;
-        } else if (string_starts_with(buffer, "/stats")) {
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("%s", cli_stats_display::format_detailed(ctx_cli.stats).c_str());
+        } else if (string_starts_with(buffer, "/tasks")) {
+            // Show task progress
+            std::string task_output;
+            if (ctx_cli.task_manager.empty()) {
+                task_output = "No active tasks.\n";
             } else {
-                console::log("%s", cli_stats_display::format_detailed(ctx_cli.stats).c_str());
+                task_output = ctx_cli.task_manager.format_tree();
+            }
+            if (cli_tui::is_enabled()) {
+                cli_tui::print("%s", task_output.c_str());
+            } else {
+                console::log("%s", task_output.c_str());
+            }
+            continue;
+        } else if (string_starts_with(buffer, "/task ")) {
+            // Manual task management: /task create <description>
+            std::string cmd = string_strip(buffer.substr(6));
+            if (string_starts_with(cmd, "create ")) {
+                std::string desc = string_strip(cmd.substr(7));
+                if (desc.empty()) {
+                    if (cli_tui::is_enabled()) {
+                        cli_tui::print("Usage: /task create <description>\n");
+                    } else {
+                        console::log("Usage: /task create <description>\n");
+                    }
+                } else {
+                    int id = ctx_cli.task_manager.create_task(desc);
+                    if (cli_tui::is_enabled()) {
+                        cli_tui::print("Created task #%d: %s\n", id, desc.c_str());
+                    } else {
+                        console::log("Created task #%d: %s\n", id, desc.c_str());
+                    }
+                }
+            } else if (string_starts_with(cmd, "clear")) {
+                ctx_cli.task_manager.clear();
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("All tasks cleared.\n");
+                } else {
+                    console::log("All tasks cleared.\n");
+                }
+            } else {
+                if (cli_tui::is_enabled()) {
+                    cli_tui::print("Usage: /task create <description> | /task clear\n");
+                } else {
+                    console::log("Usage: /task create <description> | /task clear\n");
+                }
             }
             continue;
         } else if (string_starts_with(buffer, "/cache")) {
