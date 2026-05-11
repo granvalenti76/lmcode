@@ -234,7 +234,7 @@ std::vector<cli_tool> get_tools_for_mode(common_tools_mode mode) {
             break;
 
         case COMMON_TOOLS_MODE_MINIMAL:
-            // Essential tools + task management
+            // Essential tools only (no task management)
             for (const auto& tool : get_default_tools()) {
                 if (tool.name == "read_file" ||
                     tool.name == "write_file" ||
@@ -243,7 +243,6 @@ std::vector<cli_tool> get_tools_for_mode(common_tools_mode mode) {
                     tools.push_back(tool);
                 }
             }
-            add_task_tools();
             break;
 
         case COMMON_TOOLS_MODE_ALL:
