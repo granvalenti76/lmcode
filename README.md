@@ -2,6 +2,11 @@
 
 LMCode is an experimental fork of `llama.cpp`, specifically targeting the `tools/llama-cli` component. It has been developed to enable agentic workflows using low-power local models.
 
+<img width="1441" height="778" alt="image" src="https://github.com/user-attachments/assets/20ef2ce7-a7e5-4110-8061-eaeaaf0f35db" />
+<img width="1441" height="778" alt="image" src="https://github.com/user-attachments/assets/8b87642c-ed48-43a6-a5c6-c756f80aa36e" />
+
+
+
 ## Overview
 
 The system provides a robust set of tools to transform a standard LLM into an agent capable of interacting with a local environment. It is designed to be lightweight and highly efficient, making it ideal for users working with limited hardware or seeking low-latency performance.
