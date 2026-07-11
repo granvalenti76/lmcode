@@ -1,34 +1,21 @@
 #include "chat.h"
 #include "common.h"
 #include "arg.h"
-#include "fit.h"
 #include "console.h"
+#include "fit.h"
+// #include "log.h"
 
+#include "server-common.h"
 #include "server-context.h"
 #include "server-task.h"
-
-// New modular components
-#include "cli-tool.h"
-#include "cli-tool-exec.h"
-#include "cli-tool-parser.h"
-#include "cli-stats.h"
-#include "cli_tui.h"
-#include "output_buffer.h"
-#include "task_manager.h"
 
 #include <array>
 #include <atomic>
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <future>
-#include <iostream>
-#include <sstream>
 #include <thread>
 #include <signal.h>
-#include <unordered_map>
-#include <unistd.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -38,57 +25,15 @@
 #include <windows.h>
 #endif
 
-
 const char * LLAMA_ASCII_LOGO = R"(
-██      ███╗   ███╗     ██████╗ ██████╗ ██████╗ ███████╗
-██      ████╗ ████║    ██╔════╝██╔═══██╗██╔══██╗██╔════╝
-██      ██╔████╔██║    ██║     ██║   ██║██║  ██║█████╗
-██      ██║╚██╔╝██║    ██║     ██║   ██║██║  ██║██╔══╝
-███████╗██║ ╚═╝ ██║    ╚██████╗╚██████╔╝██████╔╝███████╗
-╚══════╝╚═╝     ╚═╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
 )";
-
-// Funzione per stampare logo ASCII con effetto arcobaleno
-// Funzione per stampare logo ASCII con effetto arcobaleno
-// Funzione per stampare logo ASCII con effetto arcobaleno (riga per riga)
-static void print_rainbow_ascii_art(const char * art) {
-    // Ho riordinato i colori per simulare meglio un arcobaleno reale
-    static const char * colors[] = {
-        "\033[31m",  // Red
-        "\033[33m",  // Yellow
-        "\033[32m",  // Green
-        "\033[36m",  // Cyan
-        "\033[34m",  // Blue
-        "\033[35m",  // Magenta
-    };
-    
-    // Calcoliamo il numero di colori disponibili
-    int num_colors = sizeof(colors) / sizeof(colors[0]);
-    int color_idx = 0;
-
-    // Imposta il colore della primissima riga
-    console::log("%s", colors[color_idx]);
-
-    for (const char *p = art; *p; ++p) {
-        if (*p == '\n') {
-            // Quando andiamo a capo, cambiamo colore
-            color_idx = (color_idx + 1) % num_colors;
-            
-            // Chiudiamo il colore precedente, andiamo a capo, e apriamo il nuovo colore
-            console::log("\033[0m\n%s", colors[color_idx]);
-            continue;
-        }
-        
-        // Stampa il carattere normalmente (prenderà il colore impostato a inizio riga)
-        console::log("%c", *p);
-    }
-    
-    // Reset finale per non colorare tutto il resto del terminale
-    console::log("\033[0m\n");
-}
-
-// Global debug mode flag for tool parser (atomic for thread safety)
-std::atomic<bool> g_tool_parser_debug{false};
 
 static std::atomic<bool> g_is_interrupted = false;
 static bool should_stop() {
@@ -98,6 +43,8 @@ static bool should_stop() {
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 static void signal_handler(int) {
     if (g_is_interrupted.load()) {
+        // second Ctrl+C - exit immediately
+        // make sure to clear colors before exiting (not using LOG or console.cpp here to avoid deadlock)
         fprintf(stdout, "\033[0m\n");
         fflush(stdout);
         std::exit(130);
@@ -106,988 +53,148 @@ static void signal_handler(int) {
 }
 #endif
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-static std::string read_confirmation_line() {
-    std::string line;
-    char c;
-    // Legge direttamente dal kernel buffer per evitare conflitti con std::cin
-    while (read(STDIN_FILENO, &c, 1) > 0) {
-        if (c == '\n') break;
-        line += c;
-    }
-    return line;
-}
-
 struct cli_context {
     server_context ctx_server;
     json messages = json::array();
     std::vector<raw_buffer> input_files;
     task_params defaults;
     bool verbose_prompt;
-    int reasoning_budget = -1;
-    std::string reasoning_budget_message;
-    common_reasoning_format reasoning_format;
-    bool enable_thinking = true;
-    std::string user_system_prompt;  // Saved user system prompt for dynamic updates
 
-    // Tool support
-    cli_tool_registry tool_registry;
-    std::unique_ptr<cli_tool_executor> tool_executor;
-    int tool_call_limit = 20;  // Max tool calls per turn
-    int tool_calls_in_turn = 0;
-    int max_conversation_turns = 50;  // Max tool execution turns per conversation
-    int conversation_turns = 0;  // Current turn counter
-    int failed_tool_calls = 0;  // Consecutive failed tool calls
-    int max_failed_tool_calls = 6;  // Max consecutive failures before stopping
-
-    // Plan mode - show plan before executing
-    bool plan_mode = false;  // If true, show plan and wait for confirmation
-
-    // Tool cache DISABLED: causes more problems than it solves (stale data, complexity)
-    // std::unordered_map<std::string, cli_tool_result> tool_cache;
-    // bool use_tool_cache = false;
-
-    // Statistics
-    cli_stats stats;
-
-    // Debug mode
-    bool debug_mode = false;
-
-    // Task decomposition
-    TaskManager task_manager;
-    bool task_progress_changed = false;  // Flag to trigger visual output
-
-    // Accumulates fragments of a JSON tool call that was split across multiple
-    // generation turns due to n_predict truncation.  Cleared as soon as the
-    // closing delimiter is received and the full JSON is successfully parsed.
-    // Capped at 64KB to prevent unbounded growth if model keeps producing fragments.
-    std::string pending_incomplete_json;
-    static constexpr size_t MAX_PENDING_JSON = 65536;  // 64KB
-
+    // thread for showing "loading" animation
     std::atomic<bool> loading_show;
 
-    cli_context(const common_params & params, common_tools_mode mode = COMMON_TOOLS_MODE_ALL) {
+    cli_context(const common_params & params) {
         defaults.sampling    = params.sampling;
         defaults.speculative = params.speculative;
         defaults.n_keep      = params.n_keep;
         defaults.n_predict   = params.n_predict;
         defaults.antiprompt  = params.antiprompt;
 
-        defaults.stream = true;
-        defaults.timings_per_token = true;
-
-        defaults.chat_parser_params.reasoning_format = params.reasoning_format;
-        reasoning_format = params.reasoning_format;
+        defaults.stream = true; // make sure we always use streaming mode
+        defaults.timings_per_token = true; // in order to get timings even when we cancel mid-way
+        // defaults.return_progress = true; // TODO: show progress
 
         verbose_prompt = params.verbose_prompt;
-        reasoning_budget = params.sampling.reasoning_budget_tokens;
-        reasoning_budget_message = params.sampling.reasoning_budget_message;
-        enable_thinking = params.enable_reasoning != 0;
-        user_system_prompt = params.system_prompt;
-
-        // Initialize tool executor with security config
-        cli_tool_security_config security_config;
-        tool_executor = create_tool_executor(security_config);
-
-        // Load tools based on mode (--tools flag)
-        for (const auto& tool : cli_tools::get_tools_for_mode(mode)) {
-            tool_registry.add_tool(tool);
-        }
-
-        // Initialize stats
-        stats.max_tool_calls = tool_call_limit;
-    }
-
-    // Update system prompt when tools are added/removed dynamically
-    void update_tool_system_prompt() {
-        // Build the new system message content
-        std::string system_content = user_system_prompt;
-        if (!tool_registry.get_tools().empty()) {
-            if (!system_content.empty()) {
-                system_content += "\n\n";
-            }
-            system_content += cli_tool_parser::format_tool_system_message(tool_registry.get_tools());
-        }
-
-        // Find the system message in the messages array
-        for (size_t i = 0; i < messages.size(); i++) {
-            if (messages[i]["role"] == "system") {
-                // Update existing system message
-                messages[i]["content"] = system_content;
-                return;
-            }
-        }
-
-        // No system message found, create one at the beginning
-        if (!system_content.empty()) {
-            json new_msg = {{"role", "system"}, {"content", system_content}};
-            json new_messages = json::array();
-            new_messages.push_back(new_msg);
-            for (const auto& msg : messages) {
-                new_messages.push_back(msg);
-            }
-            messages = std::move(new_messages);
-        }
-    }
-
-    // Update context size stats
-    void update_context_stats() {
-        auto* ctx = ctx_server.get_llama_context();
-        if (ctx) {
-            stats.n_ctx_total = llama_n_ctx(ctx);
-
-            // Get actual KV cache usage from llama.cpp
-            auto* mem = llama_get_memory(ctx);
-            if (mem) {
-                auto pos_max = llama_memory_seq_pos_max(mem, 0);
-                if (pos_max >= 0) {
-                    stats.n_ctx_used = pos_max + 1;  // Positions are 0-indexed
-                } else {
-                    stats.n_ctx_used = 0;
-                }
-            }
-        }
-    }
-
-    // Display status line (in stats bar at bottom)
-    void display_status() {
-        update_context_stats();
-        if (cli_tui::is_enabled()) {
-            cli_tui::set_stats_line(cli_stats_display::format_status_line(stats).c_str());
-        } else {
-            console::log("\n%s\n", cli_stats_display::format_status_line(stats).c_str());
-            console::flush();
-        }
-    }
-
-    // ================================================================
-    // Task decomposition helpers
-    // ================================================================
-
-    // Print task progress tree to CLI
-    void print_task_progress() {
-        if (task_manager.empty()) return;
-        std::string tree = task_manager.format_tree();
-        if (cli_tui::is_enabled()) {
-            cli_tui::print("%s", tree.c_str());
-        } else {
-            console::log("%s", tree.c_str());
-            console::flush();
-        }
-    }
-
-    // Inject task status into the system prompt
-    // This is called after every task mutation so the model sees current state
-    void update_task_system_prompt() {
-        std::string task_summary = task_manager.get_summary();
-        if (task_summary.empty()) return;
-
-        // Find and update the last system message with task info appended
-        // We look for a system message that already has task info
-        for (size_t i = 0; i < messages.size(); i++) {
-            if (messages[i]["role"] == "system") {
-                std::string content = messages[i]["content"];
-
-                // Remove any previous task progress section
-                size_t task_pos = content.find("\n[Task Progress]");
-                if (task_pos != std::string::npos) {
-                    content = content.substr(0, task_pos);
-                }
-
-                // Append fresh task progress
-                content += "\n\n" + task_summary;
-                messages[i]["content"] = content;
-                return;
-            }
-        }
-    }
-
-    // Handle task management tools (decompose, list_tasks, set_task_status)
-    // Returns true if the tool was handled as a task tool
-    bool handle_task_tool_call(const cli_tool_call& call, cli_tool_result& result) {
-        result.tool_call_id = call.id;
-        result.exit_code = 0;
-        result.success = true;
-
-        try {
-            auto args = json::parse(call.arguments);
-
-            if (call.name == "decompose") {
-                int task_id = args.value("task_id", 0);
-                auto steps = args["steps"].get<std::vector<std::string>>();
-
-                // If task_id is 0, create a new root task first
-                if (task_id == 0 || get_task(task_id) == nullptr) {
-                    if (steps.empty()) {
-                        result.content = "Error: steps array is empty";
-                        result.success = false;
-                        result.exit_code = -1;
-                        return true;
-                    }
-                    task_id = task_manager.create_task(steps[0]);
-                    steps.erase(steps.begin());
-                    if (steps.empty()) {
-                        result.content = "Created task #" + std::to_string(task_id) + ": " +
-                            (task_manager.get_task(task_id) ? task_manager.get_task(task_id)->description : "");
-                        result.success = true;
-                        task_progress_changed = true;
-                        return true;
-                    }
-                }
-
-                auto created_ids = task_manager.decompose_task(task_id, steps);
-
-                // Build result message
-                std::stringstream ss;
-                const Task* parent = task_manager.get_task(task_id);
-                ss << "Decomposed task #" << task_id
-                   << (parent ? " (" + parent->description + ")" : "")
-                   << " into " << created_ids.size() << " subtasks:\n";
-                for (size_t i = 0; i < created_ids.size(); i++) {
-                    const Task* t = task_manager.get_task(created_ids[i]);
-                    ss << "  " << (i+1) << ". [#" << created_ids[i] << "] "
-                       << (t ? t->description : "?") << "\n";
-                }
-                result.content = ss.str();
-                task_progress_changed = true;
-
-            } else if (call.name == "set_task_status") {
-                int task_id = args["task_id"];
-                std::string status_str = args["status"];
-
-                TaskStatus status;
-                if (status_str == "DONE") status = TaskStatus::DONE;
-                else if (status_str == "FAILED") status = TaskStatus::FAILED;
-                else if (status_str == "IN_PROGRESS") status = TaskStatus::IN_PROGRESS;
-                else if (status_str == "TODO") status = TaskStatus::TODO;
-                else {
-                    result.content = "Invalid status: " + status_str + ". Valid values: TODO, IN_PROGRESS, DONE, FAILED";
-                    result.success = false;
-                    result.exit_code = -1;
-                    return true;
-                }
-
-                const Task* task = task_manager.get_task(task_id);
-                if (!task) {
-                    result.content = "Task #" + std::to_string(task_id) + " not found.";
-                    result.success = false;
-                    result.exit_code = -1;
-                    return true;
-                }
-
-                task_manager.set_task_status(task_id, status);
-                result.content = "Task #" + std::to_string(task_id) + " (" + task->description + ") marked as " + status_str;
-                task_progress_changed = true;
-
-            } else if (call.name == "list_tasks") {
-                if (task_manager.empty()) {
-                    result.content = "No active tasks.";
-                } else if (args.contains("task_id")) {
-                    int task_id = args["task_id"];
-                    result.content = task_manager.format_task_detail(task_id);
-                } else {
-                    result.content = task_manager.format_tree();
-                }
-
-            } else {
-                return false; // Not a task tool
-            }
-
-        } catch (const json::parse_error& e) {
-            result.content = std::string("JSON parse error: ") + e.what();
-            result.success = false;
-            result.exit_code = -1;
-        } catch (const json::type_error& e) {
-            result.content = std::string("Invalid arguments: ") + e.what();
-            result.success = false;
-            result.exit_code = -1;
-        }
-
-        return true;
-    }
-
-    // Helper to get task by ID (uses task_manager)
-    const Task* get_task(int id) const {
-        return task_manager.get_task(id);
     }
 
     std::string generate_completion(result_timings & out_timings) {
-        std::string total_content;
-        bool model_has_more_to_say = true;
+        server_response_reader rd = ctx_server.get_response_reader();
+        auto chat_params = format_chat();
+        {
+            // TODO: reduce some copies here in the future
+            server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
+            task.id         = rd.get_new_id();
+            task.index      = 0;
+            task.params     = defaults;           // copy
+            task.cli_prompt = chat_params.prompt; // copy
+            task.cli_files  = input_files;        // copy
+            task.cli        = true;
 
-        while (model_has_more_to_say && tool_calls_in_turn < tool_call_limit) {
-            // Update stats from previous timings
-            cli_stats_display::update_from_timings(stats, out_timings);
-            stats.n_tool_calls = 0;  // Reset for this turn
-
-            server_response_reader rd = ctx_server.get_response_reader();
-            auto chat_params = format_chat();
-            {
-                server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
-                task.id         = rd.get_new_id();
-                task.index      = 0;
-                task.params     = defaults;
-                task.cli_prompt = chat_params.prompt;
-                task.cli_files  = input_files;
-                task.cli        = true;
-
-                task.params.chat_parser_params.format = chat_params.format;
-                task.params.chat_parser_params.generation_prompt = chat_params.generation_prompt;
-                if (!chat_params.parser.empty()) {
-                    task.params.chat_parser_params.parser.load(chat_params.parser);
-                }
-
-                // Reasoning budget
-                if (reasoning_budget >= 0 && !chat_params.thinking_end_tag.empty()) {
-                    const llama_vocab * vocab = llama_model_get_vocab(
-                        llama_get_model(ctx_server.get_llama_context()));
-
-                    task.params.sampling.reasoning_budget_tokens = reasoning_budget;
-                    task.params.sampling.generation_prompt = chat_params.generation_prompt;
-
-                    if (!chat_params.thinking_start_tag.empty()) {
-                        task.params.sampling.reasoning_budget_start =
-                            common_tokenize(vocab, chat_params.thinking_start_tag, false, true);
-                    }
-                    task.params.sampling.reasoning_budget_end =
-                        common_tokenize(vocab, chat_params.thinking_end_tag, false, true);
-                    task.params.sampling.reasoning_budget_forced =
-                        common_tokenize(vocab, reasoning_budget_message + chat_params.thinking_end_tag, false, true);
-                }
-
-                rd.post_task({std::move(task)});
+            // chat template settings
+            task.params.chat_parser_params = common_chat_parser_params(chat_params);
+            task.params.chat_parser_params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
+            if (!chat_params.parser.empty()) {
+                task.params.chat_parser_params.parser.load(chat_params.parser);
             }
 
-            if (verbose_prompt) {
-                console::set_display(DISPLAY_TYPE_PROMPT);
-                console::log("%s\n\n", chat_params.prompt.c_str());
-                console::set_display(DISPLAY_TYPE_RESET);
+            // reasoning budget sampler
+            if (!chat_params.thinking_end_tag.empty()) {
+                const llama_vocab * vocab = llama_model_get_vocab(
+                    llama_get_model(ctx_server.get_llama_context()));
+
+                task.params.sampling.reasoning_budget_tokens = defaults.sampling.reasoning_budget_tokens;
+                task.params.sampling.generation_prompt = chat_params.generation_prompt;
+
+                if (!chat_params.thinking_start_tag.empty()) {
+                    task.params.sampling.reasoning_budget_start =
+                        common_tokenize(vocab, chat_params.thinking_start_tag, false, true);
+                }
+                task.params.sampling.reasoning_budget_end =
+                    common_tokenize(vocab, chat_params.thinking_end_tag, false, true);
+                task.params.sampling.reasoning_budget_forced =
+                    common_tokenize(vocab, defaults.sampling.reasoning_budget_message + chat_params.thinking_end_tag, false, true);
             }
 
-            console::spinner::start();
+            rd.post_task({std::move(task)});
+        }
 
-            // Retry loop to handle HTTP_POLLING_SECONDS timeout (1s is too short for slow generation)
-            // Large files written via append_file can take 60-120+ seconds for full JSON generation
-            constexpr int GENERATION_TIMEOUT_SECONDS = 120;  // Max time to wait between tokens
-            constexpr int RETRY_INTERVAL_SECONDS = 1;        // Match HTTP_POLLING_SECONDS
-            int elapsed_seconds = 0;
+        if (verbose_prompt) {
+            console::set_display(DISPLAY_TYPE_PROMPT);
+            console::log("%s\n\n", chat_params.prompt.c_str());
+            console::set_display(DISPLAY_TYPE_RESET);
+        }
 
-            server_task_result_ptr result = rd.next(should_stop);
+        // wait for first result
+        console::spinner::start();
+        server_task_result_ptr result = rd.next(should_stop);
 
-            // If first result is null, keep waiting (model might be slow to start)
-            while (result == nullptr && !should_stop() && elapsed_seconds < GENERATION_TIMEOUT_SECONDS) {
-                elapsed_seconds += RETRY_INTERVAL_SECONDS;
-                result = rd.next(should_stop);
+        console::spinner::stop();
+        std::string curr_content;
+        bool is_thinking = false;
+
+        while (result) {
+            if (should_stop()) {
+                break;
             }
-
-            console::spinner::stop();
-            std::string curr_content;
-            bool is_thinking = false;  // For native reasoning_content tracking
-
-            // Novità: Nascondiamo l'output se stiamo ricostruendo un JSON frammentato
-            bool hiding_tool_json = !pending_incomplete_json.empty();
-
-            while (result) {
-                if (should_stop()) {
-                    break;
-                }
-                if (result->is_error()) {
-                    json err_data = result->to_json();
-                    if (err_data.contains("message")) {
-                        console::error("Error: %s\n", err_data["message"].get<std::string>().c_str());
-                    } else {
-                        console::error("Error: %s\n", err_data.dump().c_str());
-                    }
-                    return total_content;
-                }
-                auto res_partial = dynamic_cast<server_task_result_cmpl_partial *>(result.get());
-                if (res_partial) {
-                    out_timings = std::move(res_partial->timings);
-                    for (const auto & diff : res_partial->oaicompat_msg_diffs) {
-                        if (!diff.content_delta.empty()) {
-                            // Aggiungi sempre alla history per il parsing
-                            curr_content += diff.content_delta;
-
-                            // Se siamo in debug (/debug attivato), mostra il JSON grezzo rovesciato a schermo
-                            if (g_tool_parser_debug) {
-                                if (cli_tui::is_enabled()) {
-                                    cli_tui::print_stream(diff.content_delta.c_str());
-                                } else {
-                                    console::log("%s", diff.content_delta.c_str());
-                                    console::flush();
-                                }
-                            } else {
-                                // Logica Beautifier a Latenza Zero
-                                if (!hiding_tool_json) {
-                                    // Identifichiamo l'inizio di una chiamata tool (anche se arriva in più token)
-                                    if (curr_content.find("{\"name\":") != std::string::npos ||
-                                        curr_content.find("[{\"name\":") != std::string::npos) {
-
-                                        hiding_tool_json = true;
-
-                                        // ANSI Magic: \r torna a inizio riga, \033[K cancella la riga.
-                                        // Cancella il frammento '{"name":' appena stampato e lo abbellisce.
-                                        const char* ui_msg = "\r\033[K\033[36m[ ⚙️ Ricezione dati tool... ]\033[0m";
-
-                                        if (cli_tui::is_enabled()) {
-                                            cli_tui::print_stream(ui_msg);
-                                        } else {
-                                            console::log("%s", ui_msg);
-                                            console::flush();
-                                        }
-                                    } else {
-                                        // Stampa il testo normale istantaneamente (zero latenza)
-                                        if (cli_tui::is_enabled()) {
-                                            cli_tui::print_stream(diff.content_delta.c_str());
-                                        } else {
-                                            console::log("%s", diff.content_delta.c_str());
-                                            console::flush();
-                                        }
-                                    }
-                                }
-                                // Se hiding_tool_json è true, ingoiamo i token del JSON nel vuoto
-                                // Verranno passati al parser a fine generazione ma non sporcheranno lo schermo
-                            }
-                        }
-                        if (!diff.reasoning_content_delta.empty()) {
-                            if (g_tool_parser_debug) {
-                                console::set_display(DISPLAY_TYPE_REASONING);
-                                if (!is_thinking) {
-                                    console::log("[Start thinking]\n");
-                                }
-                                is_thinking = true;
-                                console::log("%s", diff.reasoning_content_delta.c_str());
-                                console::flush();
-                            }
-                        }
-                    }
-
-                    // Update timings (stats updated after generation completes)
-                    cli_stats_display::update_from_timings(stats, out_timings);
-                }
-                auto res_final = dynamic_cast<server_task_result_cmpl_final *>(result.get());
-                if (res_final) {
-                    out_timings = std::move(res_final->timings);
-                    break;
-                }
-
-                // Get next result with retry logic for intermediate timeouts
-                elapsed_seconds = 0;  // Reset counter for intermediate tokens
-                result = rd.next(should_stop);
-
-                // If we get a null result mid-generation, wait a bit more before giving up
-                // This handles slow token generation (e.g., during long JSON tool calls)
-                while (result == nullptr && !should_stop() && elapsed_seconds < GENERATION_TIMEOUT_SECONDS) {
-                    elapsed_seconds += RETRY_INTERVAL_SECONDS;
-                    result = rd.next(should_stop);
-                }
-            }
-
-            g_is_interrupted.store(false);
-
-            // Check for tool calls in the response
-            if (!curr_content.empty()) {
-                auto tool_calls = cli_tool_parser::parse_tool_calls(curr_content);
-
-                // Debug: show raw content if no tool calls detected
-                if (tool_calls.empty() && !curr_content.empty() && g_tool_parser_debug) {
-                    console::log("\n\033[90m[Debug: No tool calls detected in response]\033[0m\n");
-                    console::log("\033[90mRaw response (first 200 chars): %s...\033[0m\n",
-                        curr_content.substr(0, std::min(size_t(200), curr_content.size())).c_str());
-                }
-
-                // Check for incomplete JSON (truncated tool calls).
-                // Uses a string-aware state machine so that { } inside string values
-                // are not counted as structural braces (fixes the main false-positive).
-                bool has_incomplete_json = false;
-                if (curr_content.find("{\"name\":") != std::string::npos ||
-                    curr_content.find("[{\"name\":") != std::string::npos) {
-
-                    // Returns true when the tool-call JSON object/array has not been
-                    // properly closed yet.  We anchor the search to the actual tool call
-                    // pattern ({"name": or [{"name":) so that stray { } characters that
-                    // appear in thinking/reasoning text before the JSON are not counted.
-                    auto is_actually_incomplete = [](const std::string& content) -> bool {
-                        // Find the start of the tool call JSON, not just any {
-                        size_t json_start = std::string::npos;
-
-                        // Try array form first: [{"name":
-                        size_t arr_pos = content.find("[{\"name\":");
-                        if (arr_pos != std::string::npos) {
-                            json_start = arr_pos;
-                        }
-                        // Try object form: {"name":
-                        size_t obj_pos = content.find("{\"name\":");
-                        if (obj_pos != std::string::npos) {
-                            // Pick whichever comes first
-                            if (json_start == std::string::npos || obj_pos < json_start) {
-                                json_start = obj_pos;
-                            }
-                        }
-
-                        if (json_start == std::string::npos) return false;
-
-                        // Walk through the JSON with a proper string-aware state machine.
-                        // This mirrors the logic in extract_json_value() in cli-tool-parser.cpp
-                        // and correctly ignores { } [ ] that appear inside string literals.
-                        int depth = 0;
-                        bool in_string = false;
-                        bool escape_next = false;
-
-                        for (size_t i = json_start; i < content.size(); i++) {
-                            char c = content[i];
-
-                            if (escape_next) {
-                                escape_next = false;
-                                continue;
-                            }
-                            if (c == '\\' && in_string) {
-                                escape_next = true;
-                                continue;
-                            }
-                            if (c == '"') {
-                                in_string = !in_string;
-                                continue;
-                            }
-
-                            if (!in_string) {
-                                if (c == '{' || c == '[') {
-                                    depth++;
-                                } else if (c == '}' || c == ']') {
-                                    depth--;
-                                    if (depth == 0) {
-                                        return false;  // Top-level value closed → complete
-                                    }
-                                }
-                            }
-                        }
-
-                        return depth > 0;  // Still open → incomplete
-                    };
-
-                    if (is_actually_incomplete(curr_content)) {
-                        has_incomplete_json = true;
-                        console::log("\033[90m[Incomplete JSON detected, prompting for continuation]\033[0m\n");
-
-                        // Accumulate the partial fragment so the next iteration can
-                        // reconstruct the full JSON for parsing.
-                        pending_incomplete_json += curr_content;
-
-                        // Cap size to prevent unbounded growth
-                        if (pending_incomplete_json.size() > MAX_PENDING_JSON) {
-                            console::log("\033[31m[Pending JSON exceeded max size (%zu bytes), discarding]\033[0m\n",
-                                MAX_PENDING_JSON);
-                            pending_incomplete_json.clear();
-                            model_has_more_to_say = false;
-                            break;
-                        }
-
-                        // Do NOT push an assistant message yet — the message is not
-                        // complete. We'll push it once we have the full JSON.
-                        // Note: total_content is also deferred for the same reason.
-
-                        // Ask the model to emit only the missing closing syntax.
-                        messages.push_back({
-                            {"role", "user"},
-                            {"content", "Your JSON tool call was cut off. Continue EXACTLY from where it was truncated — output ONLY the missing closing syntax (no preamble, no explanation)."}
-                        });
-                        model_has_more_to_say = true;
-                    }
-                }
-
-                // If the previous iteration left a pending fragment and this one
-                // looks complete, splice them together and re-run the parser on the
-                // full reconstructed JSON.
-                if (!has_incomplete_json && !pending_incomplete_json.empty()) {
-                    std::string full_json = pending_incomplete_json + curr_content;
-                    pending_incomplete_json.clear();
-                    curr_content = full_json;
-                    // Re-parse now that we have the full JSON
-                    tool_calls = cli_tool_parser::parse_tool_calls(curr_content);
-                    if (g_tool_parser_debug) {
-                        console::log("\033[90m[Reconstructed JSON — re-parsed %zu tool call(s)]\033[0m\n",
-                            tool_calls.size());
-                    }
-                }
-
-                // Add assistant message only when the JSON is complete.
-                if (!has_incomplete_json) {
-                    messages.push_back({
-                        {"role", "assistant"},
-                        {"content", curr_content}
-                    });
-                    total_content += curr_content;
-                }
-
-                // Execute tool calls only if JSON is complete
-                if (!tool_calls.empty() && tool_calls_in_turn < tool_call_limit && !has_incomplete_json) {
-                    if (g_tool_parser_debug) {
-                        console::log("\n\033[1m\033[36m[Tool calls detected: %zu]\033[0m\n", tool_calls.size());
-                    }
-
-                    for (const auto& call : tool_calls) {
-                        // Validate tool call before processing
-                        if (call.name.empty()) {
-                            if (g_tool_parser_debug) {
-                                console::log("\033[33m[Skipping invalid tool call: empty name]\033[0m\n");
-                            }
-                            continue;
-                        }
-
-                        // Handle SYNTAX_ERROR pseudo-tool (generated by parser when JSON is malformed)
-                        if (call.name == "SYNTAX_ERROR") {
-                            console::log("\033[31m[JSON syntax error in tool call]\033[0m\n");
-                            // Add error message to context to help model self-correct
-                            std::string error_msg = "Your tool call failed JSON validation. Error: " + call.arguments +
-                                ". Please fix the JSON syntax. Common issues: " +
-                                "(1) Unescaped newlines in strings (use \\n instead of actual newlines), " +
-                                "(2) Unescaped double quotes in strings (use \\\\\" instead of \"), " +
-                                "(3) Missing commas or braces.";
-                            messages.push_back({
-                                {"role", "user"},
-                                {"content", error_msg}
-                            });
-                            failed_tool_calls++;
-                            continue;
-                        }
-
-                        // Only skip if arguments are truly missing/null (empty object {} is valid for some tools)
-                        if (call.arguments.empty() || call.arguments == "null") {
-                            if (g_tool_parser_debug) {
-                                console::log("\033[33m[Skipping tool call '%s': missing arguments]\033[0m\n",
-                                    call.name.c_str());
-                            }
-                            continue;
-                        }
-
-                        if (tool_calls_in_turn >= tool_call_limit) {
-                            console::log("\033[31m[Tool call limit reached (%d)]\033[0m\n", tool_call_limit);
-                            break;
-                        }
-
-                        if (g_tool_parser_debug) {
-                            console::log("\033[90m[Calling: %s with args: %s]\033[0m\n",
-                                call.name.c_str(), call.arguments.c_str());
-                        }
-
-                        try {
-                            handle_tool_call(call, curr_content);
-                            tool_calls_in_turn++;
-                            stats.n_tool_calls = tool_calls_in_turn;
-                            stats.n_tool_calls_total++;
-                        } catch (const std::exception& e) {
-                            console::error("\033[31m[Tool execution error: %s]\033[0m\n", e.what());
-                            add_tool_result_to_messages(call.id, std::string("Error: ") + e.what());
-                        } catch (...) {
-                            console::error("\033[31m[Tool execution error: unknown exception]\033[0m\n");
-                            add_tool_result_to_messages(call.id, "Error: unknown exception");
-                        }
-                    }
-
-                    // Continue loop to process next turn with tool results
-                    conversation_turns++;
-
-                    // Check for too many consecutive failures
-                    if (failed_tool_calls >= max_failed_tool_calls) {
-                        console::log("\033[31m[Too many consecutive failures (%d), stopping]\033[0m\n",
-                            max_failed_tool_calls);
-                        model_has_more_to_say = false;
-                    } else if (conversation_turns >= max_conversation_turns) {
-                        console::log("\033[31m[Max conversation turns reached (%d)]\033[0m\n", max_conversation_turns);
-                        model_has_more_to_say = false;
-                    } else {
-                        console::log("\033[36m[Processing tool results... (turn %d/%d)]\033[0m\n",
-                            conversation_turns, max_conversation_turns);
-                        // Loop continues - model will see tool results and respond
-                    }
-                } else if (has_incomplete_json) {
-                    // CRITICAL FIX: Do NOT set model_has_more_to_say to false here!
-                    // The JSON is incomplete, we need to let the model continue writing it.
-                    // model_has_more_to_say is already true from the detection logic above.
-                    console::log("\033[90m[Waiting for model to complete JSON...]\033[0m\n");
-                    // Loop will continue with the user prompt already added to ask for completion
+            if (result->is_error()) {
+                json err_data = result->to_json();
+                if (err_data.contains("message")) {
+                    console::error("Error: %s\n", err_data["message"].get<std::string>().c_str());
                 } else {
-                    // No tool calls or limit reached, model is done
-                    model_has_more_to_say = false;
+                    console::error("Error: %s\n", err_data.dump().c_str());
                 }
-            } else {
-                // Empty content, model is done
-                model_has_more_to_say = false;
+                return curr_content;
             }
-        }
-
-        // Flush any remaining streaming output
-        if (cli_tui::is_enabled()) {
-            cli_tui::flush_stream();
-        }
-
-        // Display final stats after generation
-        display_status();
-
-        return total_content;
-    }
-
-    void handle_tool_call(const cli_tool_call& call, std::string& /*response_content*/, bool skip_plan_mode = false) {
-        // Validate tool call first
-        if (call.name.empty()) {
-            console::error("\033[31m[Tool call has empty name, skipping]\033[0m\n");
-            return;
-        }
-
-        // Plan mode: show plan and wait for confirmation
-        if (!skip_plan_mode && plan_mode) {
-            console::log("\n");
-            console::log("\033[1m\033[33m[📋 PLAN MODE - Review before executing]\033[0m\n");
-            console::log("Tool: \033[1m%s\033[0m\n", call.name.c_str());
-            console::log("Arguments: %s\n", call.arguments.empty() ? "(empty)" : call.arguments.c_str());
-            console::log("\n");
-            console::set_display(DISPLAY_TYPE_USER_INPUT);
-            console::log("\033[1mExecute this tool? [y/N]: \033[0m");
-            console::flush();
-
-            std::string line;
-            bool confirmed = false;
-
-            // Suspend TUI to allow normal terminal input (with echo)
-            cli_tui::suspend();
-            try {
-                if (std::getline(std::cin, line)) {
-                    size_t start = line.find_first_not_of(" \t\n\r");
-                    if (start != std::string::npos) {
-                        std::string trimmed = line.substr(start);
-                        confirmed = (trimmed == "y" || trimmed == "Y" || trimmed == "yes" || trimmed == "YES");
+            auto res_partial = dynamic_cast<server_task_result_cmpl_partial *>(result.get());
+            if (res_partial) {
+                out_timings = std::move(res_partial->timings);
+                for (const auto & diff : res_partial->oaicompat_msg_diffs) {
+                    if (!diff.content_delta.empty()) {
+                        if (is_thinking) {
+                            console::log("\n[End thinking]\n\n");
+                            console::set_display(DISPLAY_TYPE_RESET);
+                            is_thinking = false;
+                        }
+                        curr_content += diff.content_delta;
+                        console::log("%s", diff.content_delta.c_str());
+                        console::flush();
+                    }
+                    if (!diff.reasoning_content_delta.empty()) {
+                        console::set_display(DISPLAY_TYPE_REASONING);
+                        if (!is_thinking) {
+                            console::log("[Start thinking]\n");
+                        }
+                        is_thinking = true;
+                        console::log("%s", diff.reasoning_content_delta.c_str());
+                        console::flush();
                     }
                 }
-            } catch (...) {
-                console::error("\n\033[31mError reading confirmation input.\033[0m\n");
             }
-            cli_tui::resume();
-
-            console::set_display(DISPLAY_TYPE_RESET);
-
-            if (!confirmed) {
-                console::log("\n\033[31mTool call cancelled by user.\033[0m\n");
-                add_tool_result_to_messages(call.id, "Tool call cancelled by user in plan mode");
-                return;
+            auto res_final = dynamic_cast<server_task_result_cmpl_final *>(result.get());
+            if (res_final) {
+                out_timings = std::move(res_final->timings);
+                break;
             }
+            result = rd.next(should_stop);
         }
-
-        const cli_tool* tool_def = tool_registry.get_tool(call.name);
-        if (!tool_def) {
-            console::error("Unknown tool: %s\n", call.name.c_str());
-            add_tool_result_to_messages(call.id, "Error: Unknown tool '" + call.name + "'");
-            return;
-        }
-
-        // Handle task management tools (decompose, list_tasks, set_task_status)
-        // These are handled locally, not by the executor
-        if (call.name == "decompose" || call.name == "set_task_status" || call.name == "list_tasks") {
-            cli_tool_result result;
-            bool handled = handle_task_tool_call(call, result);
-            if (handled) {
-                // Print task progress to CLI
-                if (task_progress_changed) {
-                    print_task_progress();
-                    update_task_system_prompt();
-                    task_progress_changed = false;
-                }
-                // Add result to messages
-                add_tool_result_to_messages(call.id, cli_tool_parser::format_tool_result(result));
-                return;
-            }
-        }
-
-        // Cache DISABLED: always execute tool
-        // std::string cache_key = make_cache_key(call);
-        // if (use_tool_cache && call.name == "read_file") {
-        //     auto it = tool_cache.find(cache_key);
-        //     if (it != tool_cache.end()) {
-        //         console::log("\033[90m[tool:%s using cached result]\033[0m\n", call.name.c_str());
-        //         add_tool_result_to_messages(call.id, cli_tool_parser::format_tool_result(it->second));
-        //         return;
-        //     }
-        // }
-
-        // Show compact status line
-        if (g_tool_parser_debug) {
-            console::log("\n\033[90m[tool:%s running]\033[0m\n", call.name.c_str());
-        } else {
-            // ANSI Magic: \r\033[K cancella il widget precedente "Ricezione dati tool..."
-            console::log("\r\033[K\033[90m[ ⚙️ Esecuzione: %s... ]\033[0m\n", call.name.c_str());
-            console::flush();
-        }
-
-        // Check if confirmation is needed (for non-plan-mode)
-        bool needs_confirmation = tool_executor->requires_confirmation(call);
-
-        if (needs_confirmation && !skip_plan_mode && !plan_mode) {
-            if (g_tool_parser_debug) {
-                console::log("\033[90m[tool:%s waiting for confirmation]\033[0m\n", call.name.c_str());
-            }
-            console::set_display(DISPLAY_TYPE_USER_INPUT);
-            // Non usiamo \n qui così l'utente digita sulla stessa riga
-            console::log("\r\033[K\033[1mEseguire '%s'? [y/N]: \033[0m", call.name.c_str());
-            console::flush();
-
-            std::string line;
-            bool confirmed = false;
-
-            // Suspend TUI to allow normal terminal input (with echo)
-            cli_tui::suspend();
-            try {
-                if (std::getline(std::cin, line)) {
-                    size_t start = line.find_first_not_of(" \t\n\r");
-                    if (start != std::string::npos) {
-                        std::string trimmed = line.substr(start);
-                        confirmed = (trimmed == "y" || trimmed == "Y" || trimmed == "yes" || trimmed == "YES");
-                    }
-                }
-            } catch (...) {
-                console::error("\n\033[31mError reading confirmation input.\033[0m\n");
-            }
-            cli_tui::resume();
-
-            console::set_display(DISPLAY_TYPE_RESET);
-
-            if (!confirmed) {
-                console::log("\033[90m[tool:%s cancelled]\033[0m\n", call.name.c_str());
-                add_tool_result_to_messages(call.id, "Tool call cancelled by user");
-                return;
-            }
-        }
-
-        // Execute tool with exception handling
-        cli_tool_result result;
-        try {
-            result = tool_executor->execute(call, false);
-        } catch (const std::exception& e) {
-            console::log("\033[90m[tool:%s exception: %s]\033[0m\n", call.name.c_str(), e.what());
-            result.success = false;
-            result.error = std::string("Exception: ") + e.what();
-            result.exit_code = -1;
-        } catch (...) {
-            console::log("\033[90m[tool:%s unknown exception]\033[0m\n", call.name.c_str());
-            result.success = false;
-            result.error = "Unknown exception";
-            result.exit_code = -1;
-        }
-
-        // Cache DISABLED: always execute tool, never cache results
-        // std::string cache_key = make_cache_key(call);
-        // if (use_tool_cache && result.success && call.name == "read_file") {
-        //     tool_cache[cache_key] = result;
-        // }
-
-        // Cache invalidation DISABLED: no cache to invalidate
-        // if (result.success && (call.name == "write_file" || call.name == "touch_file" ||
-        //                        call.name == "insert_line" || call.name == "replace_range" ||
-        //                        call.name == "delete_lines")) {
-        //     ...
-        // }
-
-        // Show result status
-        if (result.success) {
-            if (g_tool_parser_debug) {
-                console::log("\033[90m[tool:%s done]\033[0m\n", call.name.c_str());
-            } else {
-                console::log("\r\033[90m[tool:%s done]\033[0m\n", call.name.c_str());
-            }
-            failed_tool_calls = 0;  // Reset failure counter on success
-        } else {
-            if (g_tool_parser_debug) {
-                console::log("\033[90m[tool:%s failed: %s]\033[0m\n", call.name.c_str(),
-                    result.error.empty() ? "unknown error" : result.error.c_str());
-            } else {
-                console::log("\r\033[90m[tool:%s failed]\033[0m\n", call.name.c_str());
-            }
-            // Log exit code for debugging
-            if (result.exit_code != 0 && result.exit_code != -1) {
-                if (g_tool_parser_debug) {
-                    console::log("\033[90m[tool:%s exit code: %d]\033[0m\n", call.name.c_str(), result.exit_code);
-                }
-            }
-            // Always show output content, even on failure (important for debugging!)
-            if (!result.content.empty()) {
-                std::string display_content = result.content;
-                if (display_content.size() > 500) {
-                    display_content = display_content.substr(0, 500) + "\n... [truncated]";
-                }
-                if (g_tool_parser_debug) {
-                    console::log("\033[90m[tool:%s output: %s]\033[0m\n",
-                        call.name.c_str(), display_content.c_str());
-                }
-            }
-            failed_tool_calls++;  // Increment failure counter
-        }
-
-        // Show output only if non-empty and not too long
-        if (result.success && !result.content.empty()) {
-            // Truncate for display
-            std::string display_content = result.content;
-            if (display_content.size() > 200) {
-                display_content = display_content.substr(0, 200) + "\n... [output truncated]";
-            }
-            if (g_tool_parser_debug) {
-                console::log("\033[90m[tool:%s output: %s]\033[0m\n",
-                    call.name.c_str(), display_content.c_str());
-            }
-        }
-
-        // Add result to messages for the model
-        add_tool_result_to_messages(call.id, cli_tool_parser::format_tool_result(result));
+        g_is_interrupted.store(false);
+        // server_response_reader automatically cancels pending tasks upon destruction
+        return curr_content;
     }
 
-    void add_tool_result_to_messages(const std::string& tool_call_id, const std::string& result) {
-        // nlohmann::json will handle escaping automatically - no manual escape needed!
-        std::string safe_result = result;
-
-        // Truncate very long tool results to prevent OOM
-        // Increased to 16KB to accommodate file read ranges with metadata
-        const size_t MAX_TOOL_RESULT = 16384;  // 16KB (was 8KB)
-        if (safe_result.size() > MAX_TOOL_RESULT) {
-            safe_result = safe_result.substr(0, MAX_TOOL_RESULT) + "\n... [truncated]";
-        }
-
-        // Use "user" role with format matching our system prompt examples
-        // Include tool_call_id so the model can correlate results with calls
-        messages.push_back({
-            {"role", "user"},
-            {"content", "[tool result " + tool_call_id + ": " + safe_result + "]"}
-        });
-    }
-
+    // TODO: support remote files in the future (http, https, etc)
     std::string load_input_file(const std::string & fname, bool is_media) {
-        std::error_code ec;
-
-        // Check if file exists first
-        if (!std::filesystem::exists(fname, ec) || ec) {
-            console::error("File does not exist: %s\n", fname.c_str());
+        std::ifstream file(fname, std::ios::binary);
+        if (!file) {
             return "";
         }
-
         if (is_media) {
-            std::ifstream file(fname, std::ios::binary);
-            if (!file) {
-                console::error("Cannot open file: %s\n", fname.c_str());
-                return "";
-            }
             raw_buffer buf;
             buf.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             input_files.push_back(std::move(buf));
-            return mtmd_default_marker();
+            return get_media_marker();
         } else {
-            std::ifstream file(fname, std::ios::binary);
-            if (!file) {
-                console::error("Cannot open file: %s\n", fname.c_str());
-                return "";
-            }
             std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            if (content.empty()) {
-                console::log("Warning: File is empty: %s\n", fname.c_str());
-            }
             return content;
         }
     }
@@ -1096,128 +203,174 @@ struct cli_context {
         auto meta = ctx_server.get_meta();
         auto & chat_params = meta.chat_params;
 
-        // Convert cli_tool to common_chat_tool (for template info only)
-        std::vector<common_chat_tool> tools;
-        for (const auto& tool : tool_registry.get_tools()) {
-            tools.push_back({tool.name, tool.description, tool.parameters});
-        }
+        auto caps = common_chat_templates_get_caps(chat_params.tmpls.get());
 
         common_chat_templates_inputs inputs;
         inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
-        // DISABLE native llama.cpp tool handling - we use custom JSON format
-        // inputs.tools and tool_choice would inject <|python_tag|> etc.
-        // which conflicts with our custom parser
-        inputs.tools                 = {};  // Empty - we inject tool docs in system prompt
+        inputs.tools                 = {}; // TODO
         inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_NONE;
-        inputs.json_schema           = "";
-        inputs.grammar               = "";
+        inputs.json_schema           = ""; // TODO
+        inputs.grammar               = ""; // TODO
         inputs.use_jinja             = chat_params.use_jinja;
-        inputs.parallel_tool_calls   = false;  // We handle sequentially
+        inputs.parallel_tool_calls   = caps["supports_parallel_tool_calls"];
         inputs.add_generation_prompt = true;
-        inputs.reasoning_format      = reasoning_format;
-        inputs.force_pure_content    = true;  // Don't use llama.cpp tool parsing
-        inputs.enable_thinking       = enable_thinking && common_chat_templates_support_enable_thinking(chat_params.tmpls.get());
+        inputs.reasoning_format      = COMMON_REASONING_FORMAT_DEEPSEEK;
+        inputs.force_pure_content    = chat_params.force_pure_content;
+        inputs.enable_thinking       = chat_params.enable_thinking ? common_chat_templates_support_enable_thinking(chat_params.tmpls.get()) : false;
 
-        try {
-            return common_chat_templates_apply(chat_params.tmpls.get(), inputs);
-        } catch (const std::exception& e) {
-            console::error("Error applying chat template: %s\n", e.what());
-            // Return minimal valid chat params as fallback
-            common_chat_params fallback;
-            if (!inputs.messages.empty()) {
-                fallback.prompt = inputs.messages.back().content;
-            } else {
-                fallback.prompt = "";
-            }
-            return fallback;
-        }
+        // Apply chat template to the list of messages
+        return common_chat_templates_apply(chat_params.tmpls.get(), inputs);
     }
 };
 
-// ============================================================================
-// Commands
-// ============================================================================
-
-static const std::array<const std::string, 17> cmds = {
+// TODO?: Make this reusable, enums, docs
+static const std::array<std::string_view, 7> cmds = {
     "/audio ",
-    "/auto ",
-    "/cache",
     "/clear",
-    "/debug",
     "/exit",
+    "/glob ",
     "/image ",
-    "/plan ",
     "/read ",
     "/regen",
-    "/stats",
-    "/thinking",
-    "/tool ",
-    "/tools",
-    "/task",
-    "/tasks",
-    "/help",
 };
 
-// ============================================================================
-// Main
-// ============================================================================
+static std::vector<std::pair<std::string, size_t>> auto_completion_callback(std::string_view line, size_t cursor_byte_pos) {
+    std::vector<std::pair<std::string, size_t>> matches;
+    std::string cmd;
+
+    if (line.length() > 1 && line.front() == '/' && !std::any_of(cmds.begin(), cmds.end(), [line](std::string_view prefix) {
+        return string_starts_with(line, prefix);
+    })) {
+        auto it = cmds.begin();
+
+        while ((it = std::find_if(it, cmds.end(), [line](std::string_view cmd_line) {
+            return string_starts_with(cmd_line, line);
+        })) != cmds.end()) {
+            matches.emplace_back(*it, it->length());
+            ++it;
+        }
+    } else {
+        auto it = std::find_if(cmds.begin(), cmds.end(), [line](std::string_view prefix) {
+            return prefix.back() == ' ' && string_starts_with(line, prefix);
+        });
+
+        if (it != cmds.end()) {
+            cmd = *it;
+        }
+    }
+
+    if (!cmd.empty() && cmd != "/glob " && line.length() >= cmd.length() && cursor_byte_pos >= cmd.length()) {
+        const std::string path_prefix  = std::string(line.substr(cmd.length(), cursor_byte_pos - cmd.length()));
+        const std::string path_postfix = std::string(line.substr(cursor_byte_pos));
+        auto cur_dir = std::filesystem::current_path();
+        std::string cur_dir_str = cur_dir.string();
+        std::string expanded_prefix = path_prefix;
+
+#if !defined(_WIN32)
+        if (string_starts_with(path_prefix, '~')) {
+            const char * home = std::getenv("HOME");
+            if (home && home[0]) {
+                expanded_prefix = home + path_prefix.substr(1);
+            }
+        }
+        if (string_starts_with(expanded_prefix, '/')) {
+#else
+        if (std::isalpha(expanded_prefix[0]) && expanded_prefix.find(':') == 1) {
+#endif
+            cur_dir = std::filesystem::path(expanded_prefix).parent_path();
+            cur_dir_str.clear();
+        } else if (!path_prefix.empty()) {
+            cur_dir /= std::filesystem::path(path_prefix).parent_path();
+        }
+
+        std::error_code ec;
+        for (const auto & entry : std::filesystem::directory_iterator(cur_dir, ec)) {
+            if (ec) {
+                break;
+            }
+            if (!entry.exists(ec)) {
+                ec.clear();
+                continue;
+            }
+
+            const std::string path_full = entry.path().string();
+            std::string path_entry = !cur_dir_str.empty() && string_starts_with(path_full, cur_dir_str) ? path_full.substr(cur_dir_str.length() + 1) : path_full;
+
+            if (entry.is_directory(ec)) {
+                path_entry.push_back(std::filesystem::path::preferred_separator);
+            }
+
+            if (expanded_prefix.empty() || string_starts_with(path_entry, expanded_prefix)) {
+                const std::string updated_line = cmd + path_entry;
+                matches.emplace_back(updated_line + path_postfix, updated_line.length());
+            }
+
+            if (ec) {
+                ec.clear();
+            }
+        }
+
+        if (matches.empty()) {
+            const std::string updated_line = cmd + path_prefix;
+            matches.emplace_back(updated_line + path_postfix, updated_line.length());
+        }
+
+        // Add the longest common prefix
+        if (!expanded_prefix.empty() && matches.size() > 1) {
+            const std::string_view match0(matches[0].first);
+            const std::string_view match1(matches[1].first);
+            auto it = std::mismatch(match0.begin(), match0.end(), match1.begin(), match1.end());
+            size_t len = it.first - match0.begin();
+
+            for (size_t i = 2; i < matches.size(); ++i) {
+                const std::string_view matchi(matches[i].first);
+                auto cmp = std::mismatch(match0.begin(), match0.end(), matchi.begin(), matchi.end());
+                len = std::min(len, static_cast<size_t>(cmp.first - match0.begin()));
+            }
+
+            const std::string updated_line = std::string(match0.substr(0, len));
+            matches.emplace_back(updated_line + path_postfix, updated_line.length());
+        }
+
+        std::sort(matches.begin(), matches.end(), [](const auto & a, const auto & b) {
+            return a.first.compare(0, a.second, b.first, 0, b.second) < 0;
+        });
+    }
+
+    return matches;
+}
+
+static constexpr size_t FILE_GLOB_MAX_RESULTS = 100;
 
 int main(int argc, char ** argv) {
     common_params params;
-    params.verbosity = LOG_LEVEL_ERROR;
 
-    // Parse --tools flag before common_params_parse
-    common_tools_mode tools_mode = COMMON_TOOLS_MODE_ALL;  // Default: all tools
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--tools" && i + 1 < argc) {
-            std::string value = argv[i + 1];
-            if (value == "empty") {
-                tools_mode = COMMON_TOOLS_MODE_EMPTY;
-            } else if (value == "minimal") {
-                tools_mode = COMMON_TOOLS_MODE_MINIMAL;
-            } else if (value == "all") {
-                tools_mode = COMMON_TOOLS_MODE_ALL;
-            } else {
-                console::error("Invalid --tools value: %s (use: empty, minimal, all)\n", value.c_str());
-                return 1;
-            }
-            // Remove --tools and its value from argv so common_params_parse doesn't see it
-            for (int j = i; j < argc - 2; j++) {
-                argv[j] = argv[j + 2];
-            }
-            argc -= 2;
-            break;
-        }
-    }
+    params.verbosity = LOG_LEVEL_ERROR; // by default, less verbose logs
+
+    common_init();
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CLI)) {
         return 1;
     }
 
+    // TODO: maybe support it later?
     if (params.conversation_mode == COMMON_CONVERSATION_MODE_DISABLED) {
         console::error("--no-conversation is not supported by llama-cli\n");
         console::error("please use llama-completion instead\n");
     }
 
-    common_init();
-
-    cli_context ctx_cli(params, tools_mode);
+    // struct that contains llama context and inference
+    cli_context ctx_cli(params);
 
     llama_backend_init();
     llama_numa_init(params.numa);
 
+    // TODO: avoid using atexit() here by making `console` a singleton
     console::init(params.simple_io, params.use_color);
     atexit([]() { console::cleanup(); });
 
-    // Initialize TUI for better input experience
-    cli_tui::init();
-    atexit([]() { cli_tui::cleanup(); });
-
     console::set_display(DISPLAY_TYPE_RESET);
-    console::set_completion_callback([](std::string_view, size_t) {
-        return std::vector<std::pair<std::string, size_t>>{};
-    });
+    console::set_completion_callback(auto_completion_callback);
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
     struct sigaction sigint_action;
@@ -1233,30 +386,16 @@ int main(int argc, char ** argv) {
     SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
 
-    // Loading model message
-    if (cli_tui::is_enabled()) {
-        cli_tui::print("\nLoading model... ");
-        cli_tui::force_redraw();
-    } else {
-        console::log("\nLoading model... ");
-    }
+    console::log("\nLoading model... "); // followed by loading animation
     console::spinner::start();
     if (!ctx_cli.ctx_server.load_model(params)) {
         console::spinner::stop();
-        if (cli_tui::is_enabled()) {
-            cli_tui::print("\nFailed to load the model\n");
-        } else {
-            console::error("\nFailed to load the model\n");
-        }
+        console::error("\nFailed to load the model\n");
         return 1;
     }
 
     console::spinner::stop();
-    if (cli_tui::is_enabled()) {
-        cli_tui::print("\n");
-    } else {
-        console::log("\n");
-    }
+    console::log("\n");
 
     std::thread inference_thread([&ctx_cli]() {
         ctx_cli.ctx_server.start_loop();
@@ -1264,152 +403,89 @@ int main(int argc, char ** argv) {
 
     auto inf = ctx_cli.ctx_server.get_meta();
     std::string modalities = "text";
-    if (inf.has_inp_image) modalities += ", vision";
-    if (inf.has_inp_audio) modalities += ", audio";
+    if (inf.has_inp_image) {
+        modalities += ", vision";
+    }
+    if (inf.has_inp_audio) {
+        modalities += ", audio";
+    }
 
     auto add_system_prompt = [&]() {
-        std::string system_content = ctx_cli.user_system_prompt;
-
-        // Add tool definitions to system message
-        if (!ctx_cli.tool_registry.get_tools().empty()) {
-            if (!system_content.empty()) {
-                system_content += "\n\n";
-            }
-            system_content += cli_tool_parser::format_tool_system_message(ctx_cli.tool_registry.get_tools());
-        }
-
-        if (!system_content.empty()) {
+        if (!params.system_prompt.empty()) {
             ctx_cli.messages.push_back({
                 {"role",    "system"},
-                {"content", system_content}
+                {"content", params.system_prompt}
             });
         }
     };
     add_system_prompt();
 
-    // Print startup info (logo, model info, commands)
-    if (cli_tui::is_enabled()) {
-        cli_tui::begin_bulk_print();  // Suppress render during bulk print
-        cli_tui::print("\n");
-        print_rainbow_ascii_art(LLAMA_ASCII_LOGO);
-        cli_tui::print("build      : %s\n", inf.build_info.c_str());
-        cli_tui::print("model      : %s\n", inf.model_name.c_str());
-        cli_tui::print("modalities : %s\n", modalities.c_str());
-        if (!params.system_prompt.empty()) {
-            cli_tui::print("system     : custom prompt\n");
-        }
-        cli_tui::print("tools      : %s\n",
-            tools_mode == COMMON_TOOLS_MODE_EMPTY ? "empty (use /tool to add)" :
-            tools_mode == COMMON_TOOLS_MODE_MINIMAL ? "minimal (read/write/list/shell)" :
-            "all (use /tool to remove)");
-        cli_tui::print("\n");
-        cli_tui::print("commands:\n");
-        cli_tui::print("  /exit, Ctrl+C   exit\n");
-        cli_tui::print("  /regen          regenerate last response\n");
-        cli_tui::print("  /clear          clear chat history\n");
-        cli_tui::print("  /cache          clear tool result cache\n");
-        cli_tui::print("  /plan           toggle plan mode (show plan before executing)\n");
-        cli_tui::print("  /auto <on|off>  enable/disable auto-execution\n");
-        cli_tui::print("  /stats          show detailed statistics\n");
-        cli_tui::print("  /thinking       toggle thinking mode\n");
-        cli_tui::print("  /debug          toggle debug mode (tool call logging)\n");
-        cli_tui::print("  /tui [on|off]   toggle TUI input mode (default: on)\n");
-        cli_tui::print("  /tools          list available tools\n");
-        cli_tui::print("  /tool <cmd>     tool management (add/remove/clear)\n");
-        cli_tui::print("  /tasks          show task decomposition progress\n");
-        cli_tui::print("  /task <cmd>     task management (create/clear)\n");
-        cli_tui::print("  /help           show this help\n");
-        if (inf.has_inp_image) {
-            cli_tui::print("  /image <file>   add image\n");
-        }
-        if (inf.has_inp_audio) {
-            cli_tui::print("  /audio <file>   add audio\n");
-        }
-        cli_tui::print("  /read <file>    add text file\n");
-        cli_tui::print("\n");
-        cli_tui::print("CLI flags:\n");
-        cli_tui::print("  --tools <mode>  set initial tools: empty, minimal, all (default: all)\n");
-        cli_tui::print("\n");
-        cli_tui::end_bulk_print();  // Render everything at once
-    } else {
-        console::log("\n");
-        // console::log("%s\n", LLAMA_ASCII_LOGO);
-        print_rainbow_ascii_art(LLAMA_ASCII_LOGO);
-        console::log("build      : %s\n", inf.build_info.c_str());
-        console::log("model      : %s\n", inf.model_name.c_str());
-        console::log("modalities : %s\n", modalities.c_str());
-        if (!params.system_prompt.empty()) {
-            console::log("system     : custom prompt\n");
-        }
-        console::log("tools      : %s\n",
-            tools_mode == COMMON_TOOLS_MODE_EMPTY ? "empty (use /tool to add)" :
-            tools_mode == COMMON_TOOLS_MODE_MINIMAL ? "minimal (read/write/list/shell)" :
-            "all (use /tool to remove)");
-        console::log("\n");
-        console::log("commands:\n");
-        console::log("  /exit, Ctrl+C   exit\n");
-        console::log("  /regen          regenerate last response\n");
-        console::log("  /clear          clear chat history\n");
-        console::log("  /cache          clear tool result cache\n");
-        console::log("  /plan           toggle plan mode (show plan before executing)\n");
-        console::log("  /auto <on|off>  enable/disable auto-execution\n");
-        console::log("  /stats          show detailed statistics\n");
-        console::log("  /thinking       toggle thinking mode\n");
-        console::log("  /debug          toggle debug mode (tool call logging)\n");
-        console::log("  /tui [on|off]   toggle TUI input mode (default: on)\n");
-        console::log("  /tools          list available tools\n");
-        console::log("  /tool <cmd>     tool management (add/remove/clear)\n");
-        console::log("  /tasks          show task decomposition progress\n");
-        console::log("  /task <cmd>     task management (create/clear)\n");
-        console::log("  /help           show this help\n");
-        if (inf.has_inp_image) {
-            console::log("  /image <file>   add image\n");
-        }
-        if (inf.has_inp_audio) {
-            console::log("  /audio <file>   add audio\n");
-        }
-        console::log("  /read <file>    add text file\n");
-        console::log("\n");
-        console::log("CLI flags:\n");
-        console::log("  --tools <mode>  set initial tools: empty, minimal, all (default: all)\n");
-        console::log("\n");
+    console::log("\n");
+    console::log("%s\n", LLAMA_ASCII_LOGO);
+    console::log("build      : %s\n", inf.build_info.c_str());
+    console::log("model      : %s\n", inf.model_name.c_str());
+    console::log("modalities : %s\n", modalities.c_str());
+    if (!params.system_prompt.empty()) {
+        console::log("using custom system prompt\n");
     }
+    console::log("\n");
+    console::log("available commands:\n");
+    console::log("  /exit or Ctrl+C     stop or exit\n");
+    console::log("  /regen              regenerate the last response\n");
+    console::log("  /clear              clear the chat history\n");
+    console::log("  /read <file>        add a text file\n");
+    console::log("  /glob <pattern>     add text files using globbing pattern\n");
+    if (inf.has_inp_image) {
+        console::log("  /image <file>       add an image file\n");
+    }
+    if (inf.has_inp_audio) {
+        console::log("  /audio <file>       add an audio file\n");
+    }
+    console::log("\n");
 
+    // interactive loop
     std::string cur_msg;
+
+    auto add_text_file = [&](const std::string & fname) -> bool {
+        std::string marker = ctx_cli.load_input_file(fname, false);
+        if (marker.empty()) {
+            console::error("file does not exist or cannot be opened: '%s'\n", fname.c_str());
+            return false;
+        }
+        if (inf.fim_sep_token != LLAMA_TOKEN_NULL) {
+            cur_msg += common_token_to_piece(ctx_cli.ctx_server.get_llama_context(), inf.fim_sep_token, true);
+            cur_msg += fname;
+            cur_msg.push_back('\n');
+        } else {
+            cur_msg += "--- File: ";
+            cur_msg += fname;
+            cur_msg += " ---\n";
+        }
+        cur_msg += marker;
+        console::log("Loaded text from '%s'\n", fname.c_str());
+        return true;
+    };
+
     while (true) {
         std::string buffer;
         console::set_display(DISPLAY_TYPE_USER_INPUT);
         if (params.prompt.empty()) {
-            // Use TUI input box if enabled, otherwise fallback to console::readline
-            if (cli_tui::is_enabled()) {
-                buffer = cli_tui::read_input();
-                // EOF detected (e.g., input from pipe), exit gracefully
-                if (cli_tui::was_eof()) {
-                    console::log("\n");
-                    goto end_chat_loop;
-                }
-            } else {
-                console::log("\n> ");
-                std::string line;
-                bool another_line = true;
-                do {
-                    another_line = console::readline(line, params.multiline_input);
-                    buffer += line;
-                    // EOF detected (e.g., input from pipe), exit gracefully
-                    if (line.empty() && !another_line) {
-                        console::log("\n");
-                        goto end_chat_loop;
-                    }
-                } while (another_line);
-            }
+            console::log("\n> ");
+            std::string line;
+            bool another_line = true;
+            do {
+                another_line = console::readline(line, params.multiline_input);
+                buffer += line;
+            } while (another_line);
         } else {
+            // process input prompt from args
             for (auto & fname : params.image) {
                 std::string marker = ctx_cli.load_input_file(fname, true);
                 if (marker.empty()) {
-                    console::error("file does not exist: '%s'\n", fname.c_str());
+                    console::error("file does not exist or cannot be opened: '%s'\n", fname.c_str());
                     break;
                 }
-                console::log("Loaded: '%s'\n", fname.c_str());
+                console::log("Loaded media from '%s'\n", fname.c_str());
                 cur_msg += marker;
             }
             buffer = params.prompt;
@@ -1418,7 +494,7 @@ int main(int argc, char ** argv) {
             } else {
                 console::log("\n> %s\n", buffer.c_str());
             }
-            params.prompt.clear();
+            params.prompt.clear(); // only use it once
         }
         console::set_display(DISPLAY_TYPE_RESET);
         console::log("\n");
@@ -1428,293 +504,113 @@ int main(int argc, char ** argv) {
             break;
         }
 
-        if (!buffer.empty() && buffer.back() == '\n') {
+        // remove trailing newline
+        if (!buffer.empty() &&buffer.back() == '\n') {
             buffer.pop_back();
         }
 
+        // skip empty messages
         if (buffer.empty()) {
             continue;
         }
 
         bool add_user_msg = true;
 
-        // Process commands
+        // process commands
         if (string_starts_with(buffer, "/exit")) {
             break;
         } else if (string_starts_with(buffer, "/regen")) {
             if (ctx_cli.messages.size() >= 2) {
-                ctx_cli.messages.erase(ctx_cli.messages.size() - 1);
+                size_t last_idx = ctx_cli.messages.size() - 1;
+                ctx_cli.messages.erase(last_idx);
                 add_user_msg = false;
             } else {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("No message to regenerate.\n");
-                } else {
-                    console::error("No message to regenerate.\n");
-                }
+                console::error("No message to regenerate.\n");
                 continue;
             }
         } else if (string_starts_with(buffer, "/clear")) {
             ctx_cli.messages.clear();
             add_system_prompt();
-            ctx_cli.input_files.clear();
-            ctx_cli.tool_calls_in_turn = 0;
-            ctx_cli.conversation_turns = 0;
-            ctx_cli.pending_incomplete_json.clear();
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Chat cleared.\n");
-            } else {
-                console::log("Chat cleared.\n");
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/tasks")) {
-            // Show task progress
-            std::string task_output;
-            if (ctx_cli.task_manager.empty()) {
-                task_output = "No active tasks.\n";
-            } else {
-                task_output = ctx_cli.task_manager.format_tree();
-            }
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("%s", task_output.c_str());
-            } else {
-                console::log("%s", task_output.c_str());
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/task ")) {
-            // Manual task management: /task create <description>
-            std::string cmd = string_strip(buffer.substr(6));
-            if (string_starts_with(cmd, "create ")) {
-                std::string desc = string_strip(cmd.substr(7));
-                if (desc.empty()) {
-                    if (cli_tui::is_enabled()) {
-                        cli_tui::print("Usage: /task create <description>\n");
-                    } else {
-                        console::log("Usage: /task create <description>\n");
-                    }
-                } else {
-                    int id = ctx_cli.task_manager.create_task(desc);
-                    if (cli_tui::is_enabled()) {
-                        cli_tui::print("Created task #%d: %s\n", id, desc.c_str());
-                    } else {
-                        console::log("Created task #%d: %s\n", id, desc.c_str());
-                    }
-                }
-            } else if (string_starts_with(cmd, "clear")) {
-                ctx_cli.task_manager.clear();
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("All tasks cleared.\n");
-                } else {
-                    console::log("All tasks cleared.\n");
-                }
-            } else {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Usage: /task create <description> | /task clear\n");
-                } else {
-                    console::log("Usage: /task create <description> | /task clear\n");
-                }
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/cache")) {
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Tool cache is disabled.\n");
-            } else {
-                console::log("Tool cache is disabled.\n");
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/plan")) {
-            ctx_cli.plan_mode = !ctx_cli.plan_mode;
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Plan mode %s.\n", ctx_cli.plan_mode ? "enabled" : "disabled");
-                cli_tui::print("When enabled, tool calls will be shown for approval before execution.\n");
-            } else {
-                console::log("Plan mode %s.\n", ctx_cli.plan_mode ? "enabled" : "disabled");
-                console::log("When enabled, tool calls will be shown for approval before execution.\n");
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/auto")) {
-            std::string cmd = string_strip(buffer.substr(5));
-            if (cmd == "on" || cmd == "true" || cmd == "1") {
-                ctx_cli.plan_mode = false;
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Auto-execution enabled. Tools will run without confirmation.\n");
-                } else {
-                    console::log("Auto-execution enabled. Tools will run without confirmation.\n");
-                }
-            } else if (cmd == "off" || cmd == "false" || cmd == "0") {
-                ctx_cli.plan_mode = true;
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Manual mode enabled. Tool calls will require confirmation.\n");
-                } else {
-                    console::log("Manual mode enabled. Tool calls will require confirmation.\n");
-                }
-            } else {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Usage: /auto <on|off>\n");
-                } else {
-                    console::log("Usage: /auto <on|off>\n");
-                }
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/thinking")) {
-            ctx_cli.enable_thinking = !ctx_cli.enable_thinking;
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Thinking %s.\n", ctx_cli.enable_thinking ? "enabled" : "disabled");
-            } else {
-                console::log("Thinking %s.\n", ctx_cli.enable_thinking ? "enabled" : "disabled");
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/debug")) {
-            ctx_cli.debug_mode = !ctx_cli.debug_mode;
-            g_tool_parser_debug = ctx_cli.debug_mode;
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Debug mode %s.\n", ctx_cli.debug_mode ? "enabled" : "disabled");
-            } else {
-                console::log("Debug mode %s.\n", ctx_cli.debug_mode ? "enabled" : "disabled");
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/tui")) {
-            std::string cmd = string_strip(buffer.substr(4));
-            if (cmd == "on") {
-                cli_tui::enable();
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("TUI mode enabled.\n");
-                } else {
-                    console::log("TUI mode enabled (requires valid terminal).\n");
-                }
-            } else if (cmd == "off") {
-                cli_tui::disable();
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("TUI mode disabled. Use Ctrl+C to exit.\n");
-                } else {
-                    console::log("TUI mode disabled. Use Ctrl+C to exit.\n");
-                }
-            } else {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Usage: /tui [on|off]\n");
-                } else {
-                    console::log("Usage: /tui [on|off]\n");
-                }
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/tools")) {
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("%s", ctx_cli.tool_registry.list_tools().c_str());
-            } else {
-                console::log("%s", ctx_cli.tool_registry.list_tools().c_str());
-            }
-            continue;
-        } else if (string_starts_with(buffer, "/tool ")) {
-            std::string cmd = string_strip(buffer.substr(6));
-            if (cmd == "clear") {
-                ctx_cli.tool_registry.clear_tools();
-                // Update system prompt with new tool list
-                ctx_cli.update_tool_system_prompt();
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("All tools removed.\n");
-                } else {
-                    console::log("All tools removed.\n");
-                }
-            } else if (string_starts_with(cmd, "remove ")) {
-                std::string name = string_strip(cmd.substr(7));
-                ctx_cli.tool_registry.remove_tool(name);
-                // Update system prompt with new tool list
-                ctx_cli.update_tool_system_prompt();
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Tool '%s' removed.\n", name.c_str());
-                } else {
-                    console::log("Tool '%s' removed.\n", name.c_str());
-                }
-            } else if (string_starts_with(cmd, "add ")) {
-                std::string name = string_strip(cmd.substr(4));
 
-                // Re-add from defaults
-                bool found = false;
-                for (const auto& tool : cli_tools::get_default_tools()) {
-                    if (tool.name == name) {
-                        ctx_cli.tool_registry.add_tool(tool);
-                        found = true;
-                        break;
-                    }
-                }
-                for (const auto& tool : cli_tools::get_swift_tools()) {
-                    if (tool.name == name) {
-                        ctx_cli.tool_registry.add_tool(tool);
-                        found = true;
-                        break;
-                    }
-                }
-                // Update system prompt with new tool list
-                if (found) {
-                    ctx_cli.update_tool_system_prompt();
-                }
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print(found ? "Tool '%s' added.\n" : "Tool '%s' not found.\n", name.c_str());
-                } else {
-                    console::log(found ? "Tool '%s' added.\n" : "Tool '%s' not found.\n", name.c_str());
-                }
-            } else {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("Usage: /tool <add|remove|clear> [name]\n");
-                } else {
-                    console::log("Usage: /tool <add|remove|clear> [name]\n");
-                }
-            }
+            ctx_cli.input_files.clear();
+            console::log("Chat history cleared.\n");
             continue;
-        } else if (string_starts_with(buffer, "/help")) {
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("See commands above.\n");
-            } else {
-                console::log("See commands above.\n");
-            }
-            continue;
-        } else if ((string_starts_with(buffer, "/image ") && inf.has_inp_image) ||
-                   (string_starts_with(buffer, "/audio ") && inf.has_inp_audio)) {
+        } else if (
+                (string_starts_with(buffer, "/image ") && inf.has_inp_image) ||
+                (string_starts_with(buffer, "/audio ") && inf.has_inp_audio)) {
+            // just in case (bad copy-paste for example), we strip all trailing/leading spaces
             std::string fname = string_strip(buffer.substr(7));
             std::string marker = ctx_cli.load_input_file(fname, true);
             if (marker.empty()) {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("file does not exist: '%s'\n", fname.c_str());
-                } else {
-                    console::error("file does not exist: '%s'\n", fname.c_str());
-                }
+                console::error("file does not exist or cannot be opened: '%s'\n", fname.c_str());
                 continue;
             }
             cur_msg += marker;
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Loaded: '%s'\n", fname.c_str());
-            } else {
-                console::log("Loaded: '%s'\n", fname.c_str());
-            }
+            console::log("Loaded media from '%s'\n", fname.c_str());
             continue;
         } else if (string_starts_with(buffer, "/read ")) {
             std::string fname = string_strip(buffer.substr(6));
-            std::string marker = ctx_cli.load_input_file(fname, false);
-            if (marker.empty()) {
-                if (cli_tui::is_enabled()) {
-                    cli_tui::print("file does not exist: '%s'\n", fname.c_str());
-                } else {
-                    console::error("file does not exist: '%s'\n", fname.c_str());
+            add_text_file(fname);
+            continue;
+        } else if (string_starts_with(buffer, "/glob ")) {
+            std::error_code ec;
+            size_t count = 0;
+            auto curdir = std::filesystem::current_path();
+            std::string pattern = string_strip(buffer.substr(6));
+            std::filesystem::path rel_path;
+
+            auto startglob = pattern.find_first_of("![*?");
+            if (startglob != std::string::npos && startglob != 0) {
+                auto endpath = pattern.substr(0, startglob).find_last_of('/');
+                if (endpath != std::string::npos) {
+                    std::string rel_pattern = pattern.substr(0, endpath);
+#if !defined(_WIN32)
+                    if (string_starts_with(rel_pattern, '~')) {
+                        const char * home = std::getenv("HOME");
+                        if (home && home[0]) {
+                            rel_pattern = home + rel_pattern.substr(1);
+                        }
+                    }
+#endif
+                    rel_path = rel_pattern;
+                    pattern.erase(0, endpath + 1);
+                    curdir /= rel_path;
                 }
-                continue;
             }
-            if (inf.fim_sep_token != LLAMA_TOKEN_NULL) {
-                cur_msg += common_token_to_piece(ctx_cli.ctx_server.get_llama_context(), inf.fim_sep_token, true);
-                cur_msg += fname;
-                cur_msg.push_back('\n');
-            } else {
-                cur_msg += "--- File: " + fname + " ---\n";
-            }
-            cur_msg += marker;
-            if (cli_tui::is_enabled()) {
-                cli_tui::print("Loaded: '%s'\n", fname.c_str());
-            } else {
-                console::log("Loaded: '%s'\n", fname.c_str());
+
+            for (const auto & entry : std::filesystem::recursive_directory_iterator(curdir,
+                    std::filesystem::directory_options::skip_permission_denied, ec)) {
+                if (!entry.is_regular_file()) {
+                    continue;
+                }
+
+                std::string rel = std::filesystem::relative(entry.path(), curdir, ec).string();
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+
+                if (!glob_match(pattern, rel)) {
+                    continue;
+                }
+
+                if (!add_text_file((rel_path / rel).string())) {
+                    continue;
+                }
+
+                if (++count >= FILE_GLOB_MAX_RESULTS) {
+                    console::error("Maximum number of globbed files allowed (%zu) reached.\n", FILE_GLOB_MAX_RESULTS);
+                    break;
+                }
             }
             continue;
         } else {
+            // not a command
             cur_msg += buffer;
         }
 
+        // generate response
         if (add_user_msg) {
             ctx_cli.messages.push_back({
                 {"role",    "user"},
@@ -1722,23 +618,18 @@ int main(int argc, char ** argv) {
             });
             cur_msg.clear();
         }
-
-        ctx_cli.tool_calls_in_turn = 0;  // Reset tool counter for new turn
-        ctx_cli.failed_tool_calls = 0;  // Reset failure counter for new turn
-        ctx_cli.conversation_turns = 0;  // Reset conversation turns for new user input
-        ctx_cli.pending_incomplete_json.clear();  // Discard any leftover fragment from previous turn
-
         result_timings timings;
         std::string assistant_content = ctx_cli.generate_completion(timings);
-        // Note: generate_completion already adds the assistant message to history
-
+        ctx_cli.messages.push_back({
+            {"role",    "assistant"},
+            {"content", assistant_content}
+        });
         console::log("\n");
 
         if (params.show_timings) {
             console::set_display(DISPLAY_TYPE_INFO);
             console::log("\n");
-            console::log("[ Prompt: %.1f t/s | Generation: %.1f t/s ]\n",
-                        timings.prompt_per_second, timings.predicted_per_second);
+            console::log("[ Prompt: %.1f t/s | Generation: %.1f t/s ]\n", timings.prompt_per_second, timings.predicted_per_second);
             console::set_display(DISPLAY_TYPE_RESET);
         }
 
@@ -1747,12 +638,13 @@ int main(int argc, char ** argv) {
         }
     }
 
-end_chat_loop:
     console::set_display(DISPLAY_TYPE_RESET);
+
     console::log("\nExiting...\n");
     ctx_cli.ctx_server.terminate();
     inference_thread.join();
 
+    // bump the log level to display timings
     common_log_set_verbosity_thold(LOG_LEVEL_INFO);
     common_memory_breakdown_print(ctx_cli.ctx_server.get_llama_context());
 
