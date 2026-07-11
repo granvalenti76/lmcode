@@ -197,7 +197,7 @@
 
 ## Tool Call Support
 
-Implementazione modulare di tool-call per llama-cli, ottimizzata per programmazione (Swift 6 focus).
+Implementazione modulare di tool-call per llama-lmcode, ottimizzata per programmazione (Swift 6 focus).
 
 ## Architecture
 
@@ -301,7 +301,7 @@ Timing:      Prompt: 234ms, Generation: 567ms
 
 ### Avvio Base
 ```bash
-./llama-cli -m model.gguf --reasoning on
+./llama-lmcode -m model.gguf --reasoning on
 ```
 
 ### Con Tool Personalizzati

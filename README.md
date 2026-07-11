@@ -39,7 +39,7 @@ To install LMCode, clone the repository and build it using CMake:
 git clone https://github.com/granvalenti76/lmcode
 cd lmcode
 cmake -B build
-cmake --build build --target llama-cli -j$(nproc)
+cmake --build build --target llama-lmcode -j$(nproc)
 ```
 
 ## Usage
@@ -47,7 +47,7 @@ cmake --build build --target llama-cli -j$(nproc)
 Run the executable with your preferred model and tool configuration. The `--tools` flag is optional and defaults to `all`.
 
 ```bash
-build/bin/llama-cli -fa on -c 64000 -m ~/.models/gemma-4E4.gguf --tools minimal|empty|all
+build/bin/llama-lmcode -fa on -c 64000 -m ~/.models/gemma-4E4.gguf --tools minimal|empty|all
 ```
 
 ## Chat Interface
